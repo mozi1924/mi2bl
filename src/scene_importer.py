@@ -373,11 +373,11 @@ def _create_blender_object(node, collection):
         collection.objects.link(obj)
 
     elif node.type == "cube":
-        obj = mesh_gen.create_mi_cube(name=display_name, size=1.0,
+        obj = mesh_gen.create_mi_cube(name=display_name, size=1.0, rot_point=getattr(node, "rot_point", [0,-8,0]),
                                        collection=collection)
 
     elif node.type == "surface":
-        obj = mesh_gen.create_mi_surface(name=display_name, size=1.0,
+        obj = mesh_gen.create_mi_surface(name=display_name, size=1.0, rot_point=getattr(node, "rot_point", [0,-8,0]),
                                           collection=collection)
     else:
         # Unsupported – create an empty as placeholder

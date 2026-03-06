@@ -59,6 +59,7 @@ class MINode:
         "default_values", "keyframes",
         "inherit",
         "children",
+        "rot_point"
     )
 
     def __init__(self, tl_dict):
@@ -83,6 +84,11 @@ class MINode:
 
         # inherit flags (position, rotation, scale, etc.)
         self.inherit = tl_dict.get("inherit", {})
+
+        # rot_point: offset from geometric center in MI local space.
+        # MI always saves this array regardless of rot_point_custom.
+        # Default [0, -8, 0] = bottom-center of a 16-unit shape.
+        self.rot_point = list(tl_dict.get("rot_point", [0.0, -8.0, 0.0]))
 
         # Filled in during tree building
         self.children = []
