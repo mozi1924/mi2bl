@@ -1,0 +1,17 @@
+head(SCL,POS) - MI_P_Head
+head(ROT) - MI_Head
+right_arm(SCL,POS) - MI_arm.R
+right_arm(ROT) - MI_arm.upper.R
+right_arm(BEND_ANGLE_X) - MI_arm.lower.R
+left_arm(SCL,POS) - MI_arm.L
+left_arm(ROT) - MI_arm.upper.L
+left_arm(BEND_ANGLE_X) - MI_arm.lower.L
+right_leg(SCL,POS) - MI_leg.R
+right_leg(ROT) - MI_leg.upper.R
+right_leg(BEND_ANGLE_X) - MI_leg.lower.R
+left_leg(SCL,POS) - MI_leg.L
+left_leg(ROT) - MI_leg.upper.L
+left_leg(BEND_ANGLE_X) - MI_leg.lower.L
+body(SCL,POS) - MI_Body
+body(ROT) - MI_Body Lower
+body(BEND) - MI_Body Upper

@@ -1,0 +1,20 @@
+MI_Root -> Root
+MI_Head -> Head root
+MI_arm.R -> Shoulder.R
+MI_arm.upper.R -> arm.fk.upper.R
+MI_arm.lower.R -> arm.fk.lower.R
+MI_wrist.R -> arm.wrist.ctrl.R
+MI_arm.L -> Shoulder.L
+MI_arm.upper.L -> arm.fk.upper.L
+MI_arm.lower.L -> arm.fk.lower.L
+MI_wrist.L -> arm.wrist.ctrl.L
+MI_Body Upper -> Body Upper
+MI_Body Lower -> Hip
+MI_leg.R -> leg.root.R
+MI_leg.upper.R -> leg.fk.upper.R
+MI_leg.lower.R -> leg.fk.lower.R
+MI_ankle.R -> ankle_crontrol.R
+MI_leg.L -> leg.root.L
+MI_leg.upper.L -> leg.fk.upper.L
+MI_leg.lower.L -> leg.fk.lower.L
+MI_ankle.L -> ankle_crontrol.L
