@@ -517,7 +517,7 @@ class MI_OT_ImportMiobjectScene(bpy.types.Operator):
             imported_object_map = {}
 
         rig2_status = None
-        if self.auto_append_rig2:
+        if self.auto_append_rig2 and has_character_timeline:
             rig2_armature, err = _append_rig2_and_get_armature(context)
             if err:
                 rig2_status = f"Rig2: {err}"
@@ -558,6 +558,9 @@ class MI_OT_ImportMiobjectScene(bpy.types.Operator):
                         rig2_status += f", miframes import failed ({import_err})"
                 elif self.auto_import_rig2_action:
                     rig2_status += ", no character timeline found"
+
+        elif self.auto_append_rig2 and not has_character_timeline:
+            rig2_status = "Rig2: skipped (no character timeline)"
 
         msg = (
             f"Imported {len(all_nodes)} objects from "
