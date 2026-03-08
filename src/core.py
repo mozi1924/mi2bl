@@ -50,12 +50,23 @@ MI_TO_BLENDER_EASING_MAP = {
     "easeinoutelastic": {"interpolation": "ELASTIC", "easing": "EASE_IN_OUT"},
 }
 
-def apply_mi_transition(keyframe_point, mi_transition_str):
+def apply_mi_transition(keyframe_point, mi_transition_str, kf1=None):
     """Apply a Mine-Imator easing transition to a Blender keyframe point."""
     mapped = MI_TO_BLENDER_EASING_MAP.get(mi_transition_str.lower())
     if mapped:
         keyframe_point.interpolation = mapped["interpolation"]
         keyframe_point.easing = mapped["easing"]
+        
+        # Mine-imator uses a normalized [0, 1] relative system.
+        # Blender's `kf.amplitude` defaults to `0.0`, which causes its internal Penner computation
+        # to fall back to an absolute `1.0`, resulting in a MASSIVE jump if the coordinate jump is small
+        # (e.g. 0.03 rad delta will still jump an absolute 0.35 rad bounds)!
+        # To match MI mathematically, we MUST explicitly set `kf.amplitude` to the delta value.
+        if mapped["interpolation"] == 'ELASTIC' and kf1 is not None:
+            dv = abs(kf1.co.y - keyframe_point.co.y)
+            # Blender documentation says '0.0 defaults to 1.0', so setting it to 0.0 directly is unsafe.
+            # Fallback to an extremely small value if the jump is exactly zero
+            keyframe_point.amplitude = max(dv, 0.00001)
     else:
         keyframe_point.interpolation = 'LINEAR'
 
@@ -205,6 +216,11 @@ class MIBaseImporter:
         dv = kf1.co.y - kf0.co.y
         x1, y1 = t_info["ease_in"]
         x2, y2 = t_info["ease_out"]
+        
+        # Clamp X to [0, 1] to prevent FCurve timeline flow issues
+        x1 = max(0.0, min(1.0, float(x1)))
+        x2 = max(0.0, min(1.0, float(x2)))
+        
         kf0.handle_right_type = 'FREE'
         kf1.handle_left_type = 'FREE'
         kf0.handle_right = (kf0.co.x + (x1 * dt), kf0.co.y + (y1 * dv))
@@ -231,5 +247,5 @@ class MIBaseImporter:
             elif t_type == "bezier":
                 self.apply_bezier_handles(kf0, kf1, best_t_info)
             else:
-                apply_mi_transition(kf0, t_type)
+                apply_mi_transition(kf0, t_type, kf1)
         fcurve.update()

@@ -242,6 +242,7 @@ def _apply_default_transform(obj, node, disable_scale=False):
     ry = math.radians(dv.get("ROT_Y", 0.0))  # UI Y (Yaw) → BL Z
     rz = math.radians(dv.get("ROT_Z", 0.0))  # UI Z (Roll) → BL -Y
     obj.rotation_mode = 'XYZ'
+    # MI camera zero-rot (Yaw=0) faces south (-Y in BL); Blender camera zero-rot faces -Z.
     obj.rotation_euler = Euler((rx, -rz, ry), 'XYZ')
 
     # Scale
@@ -358,7 +359,7 @@ def _apply_interpolation_to_obj(obj, kf_trans_list):
                 elif t_type == "bezier":
                     MIBaseImporter.apply_bezier_handles(kf0, kf1, best_t_info)
                 else:
-                    apply_mi_transition(kf0, t_type)
+                    apply_mi_transition(kf0, t_type, kf1)
             fcurve.update()
 
 
@@ -430,10 +431,31 @@ def _create_blender_object(node, collection):
                                        collection=collection, uv=uv, texture_size=texture_size, 
                                        texture_mirror=texture_mirror)
     elif node.type == "camera":
-        # Create a Blender Camera Object setup properly
-        cam_data = bpy.data.cameras.new(display_name + "_Cam")
-        obj = bpy.data.objects.new(display_name, cam_data)
+        # Create an Empty to hold the MI transform animation
+        obj = bpy.data.objects.new(display_name, None)
+        obj.empty_display_type = 'PLAIN_AXES'
         collection.objects.link(obj)
+        
+        # Create a Blender Camera Object setup properly, parented to the Empty
+        cam_data = bpy.data.cameras.new(display_name + "_Data")
+        cam_obj = bpy.data.objects.new(display_name + "_Lens", cam_data)
+        collection.objects.link(cam_obj)
+        
+        # Parent the camera to the Empty
+        cam_obj.parent = obj
+        
+        # MI cameras face South (-Y) and are upright (+Z) when rotation is 0.
+        # Blender cameras face Down (-Z) with Up (+Y) when rotation is 0.
+        # Rotating the camera lens itself by X=+90deg, Z=180deg perfectly aligns it to MI's default.
+        cam_obj.rotation_mode = 'XYZ'
+        cam_obj.rotation_euler = (math.pi/2, 0, math.pi)
+        
+        # Lock its transforms since it's just a proxy for the lens
+        for i in range(3):
+            cam_obj.lock_location[i] = True
+            cam_obj.lock_rotation[i] = True
+            cam_obj.lock_scale[i] = True
+            
         # Attempt to inject properties
         if hasattr(node, "keyframes") and 0 in node.keyframes:
             f0 = node.keyframes[0]
