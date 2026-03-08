@@ -92,13 +92,20 @@ def parse_mi_file_data(data):
         return data
 
     timelines = data.get("timelines", [])
+    # Build template lookup for model name resolution
+    template_map = {t["id"]: t for t in data.get("templates", []) if "id" in t}
+
     primary_id = None
     is_model = False
+    primary_template = {}
     for t in timelines:
         if t.get("type") == "char":
-            primary_id = t.get("id")
-            is_model = True
-            break
+            tmpl = template_map.get(t.get("temp", ""), {})
+            if tmpl.get("model", {}).get("name") == "human":
+                primary_id = t.get("id")
+                is_model = True
+                primary_template = tmpl
+                break
             
     if not is_model:
         for t in timelines:
@@ -150,13 +157,18 @@ def parse_mi_file_data(data):
     else:
         final_length = 0
     
-    return {
+    result = {
         "format": data.get("format", 34),
         "is_model": is_model,
         "tempo": data.get("tempo", 24),
         "length": final_length,
         "keyframes": keyframes_list
     }
+    # Prefer model info from the matched template; fall back to top-level "model" key
+    model_info = primary_template.get("model") or data.get("model")
+    if model_info:
+        result["model"] = model_info
+    return result
 
 # --- Base Importer Mixin ---
 

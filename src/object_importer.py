@@ -42,14 +42,14 @@ class MI_OT_ImportObjectAction(bpy.types.Operator, MIBaseImporter):
         is_model = data.get("is_model", True)
         if is_model:
             # If it's a character model, we SHOULD use Rig2.
-            # We can check if Rig2 is installed and suggest it.
             if hasattr(bpy.ops, "mi") and hasattr(bpy.ops.mi, "import_action"):
                 self.report({'WARNING'},
                             "This file is a character model. Using Rig2 importer instead.")
                 return bpy.ops.mi.import_action('INVOKE_DEFAULT', filepath=self.filepath)
             else:
                 self.report({'ERROR'},
-                            "This file is a character model. Please install Rig2 to import character animations.")
+                            "This file contains a Steve/Alex character model. "
+                            "No model or animation will be imported — please install Rig2.")
                 return {'CANCELLED'}
 
         # --- Timing ---
