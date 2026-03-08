@@ -47,7 +47,7 @@ def _fill_defaults(values):
 
 # ---- Data Classes ----------------------------------------------------------
 
-SUPPORTED_TYPES = {"folder", "cube", "surface", "block", "char", "camera", "audio", "bodypart", "text", "scenery", "item", "particle_spawner"}
+SUPPORTED_TYPES = {"folder", "cube", "surface", "block", "char", "camera", "audio", "bodypart", "text", "scenery", "item", "particle_spawner", "spotlight", "pointlight"}
 
 
 class MINode:

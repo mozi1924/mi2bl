@@ -252,6 +252,96 @@ def _apply_default_transform(obj, node, disable_scale=False):
     obj.scale = (sx, sz, sy)
 
 
+def _hex_to_rgb(hex_val):
+    if isinstance(hex_val, (int, float)):
+        hex_val = int(hex_val)
+        r = ((hex_val >> 16) & 0xFF) / 255.0
+        g = ((hex_val >> 8) & 0xFF) / 255.0
+        b = (hex_val & 0xFF) / 255.0
+        return (r, g, b)
+    return (1.0, 1.0, 1.0)
+
+def _apply_light_properties(light_obj, node, start_frame, fps_scale):
+    """Apply light properties and keyframes."""
+    l_data = light_obj.data
+    dv = node.default_values
+    
+    # MI light defaults
+    MI_DEFAULT_COLOR = 16777215
+    MI_DEFAULT_STRENGTH = 1.0
+    MI_DEFAULT_SPEC_STRENGTH = 1.0
+    MI_DEFAULT_SIZE = 16.0
+    MI_DEFAULT_RANGE = 250.0
+    MI_DEFAULT_SPOT_RADIUS = 45.0
+    MI_DEFAULT_SPOT_SHARPNESS = 0.5
+
+    def get_val(values, key, default):
+        return values.get(key, default)
+        
+    def _calc_energy(strength, l_range):
+        # Calculate a reasonable Watts energy based on Strength and Range
+        # A flat multiplier of 5000 * strength usually matches visible scale, 
+        # but factoring in range gives more physically accurate falloff equivalence.
+        distance_meters = l_range * MI_SCALE
+        return strength * (distance_meters ** 2) * 50.0 + (strength * 1000.0)
+
+    # helper to set and keyframe property if present
+    def process_frames():
+        # First gather all frame times including frame 0 for default
+        frames = set(node.keyframes.keys()) if node.keyframes else set()
+        frames.add(0) # ensure base frame
+        
+        for frame_num in sorted(frames):
+            time = start_frame + (frame_num * fps_scale)
+            if frame_num == 0:
+                values = dict(dv)
+                if node.keyframes and 0 in node.keyframes:
+                    values.update(node.keyframes[0])
+            else:
+                values = node.keyframes.get(frame_num, {})
+            
+            # Set properties (using MI defaults if missing on frame 0)
+            if "LIGHT_COLOR" in values or frame_num == 0:
+                l_data.color = _hex_to_rgb(get_val(values, "LIGHT_COLOR", MI_DEFAULT_COLOR))
+                l_data.keyframe_insert("color", frame=time)
+                
+            if "LIGHT_STRENGTH" in values or "LIGHT_RANGE" in values or frame_num == 0:
+                strength = get_val(values, "LIGHT_STRENGTH", MI_DEFAULT_STRENGTH)
+                l_range = get_val(values, "LIGHT_RANGE", MI_DEFAULT_RANGE)
+                l_data.energy = _calc_energy(strength, l_range)
+                l_data.keyframe_insert("energy", frame=time)
+                
+            if "LIGHT_SPECULAR_STRENGTH" in values or frame_num == 0:
+                l_data.specular_factor = get_val(values, "LIGHT_SPECULAR_STRENGTH", MI_DEFAULT_SPEC_STRENGTH)
+                l_data.keyframe_insert("specular_factor", frame=time)
+                
+            # Point/Spot properties
+            if "LIGHT_SIZE" in values or frame_num == 0:
+                l_data.shadow_soft_size = get_val(values, "LIGHT_SIZE", MI_DEFAULT_SIZE) * MI_SCALE
+                l_data.keyframe_insert("shadow_soft_size", frame=time)
+                
+            if "LIGHT_RANGE" in values or frame_num == 0:
+                l_data.cutoff_distance = get_val(values, "LIGHT_RANGE", MI_DEFAULT_RANGE) * MI_SCALE
+                l_data.keyframe_insert("cutoff_distance", frame=time)
+                if hasattr(l_data, "use_custom_distance"):
+                    l_data.use_custom_distance = True
+
+            # Spot specific properties
+            if l_data.type == 'SPOT':
+                if "LIGHT_SPOT_RADIUS" in values or frame_num == 0:
+                    l_data.spot_size = math.radians(get_val(values, "LIGHT_SPOT_RADIUS", MI_DEFAULT_SPOT_RADIUS) * 2.0)
+                    l_data.keyframe_insert("spot_size", frame=time)
+                    
+                if "LIGHT_SPOT_SHARPNESS" in values or frame_num == 0:
+                    sharp = get_val(values, "LIGHT_SPOT_SHARPNESS", MI_DEFAULT_SPOT_SHARPNESS)
+                    blend = max(0.0, min(1.0, 1.0 - sharp))
+                    l_data.spot_blend = blend
+                    l_data.keyframe_insert("spot_blend", frame=time)
+
+    process_frames()
+
+
+
 def _apply_keyframes(obj, node, start_frame, fps_scale, disable_scale=False):
     """
     Apply keyframe animation data from the MINode onto the Blender object.
@@ -462,6 +552,27 @@ def _create_blender_object(node, collection):
             if "CAM_FOV" in f0:
                 cam_data.angle = math.radians(f0["CAM_FOV"])
                 
+    elif node.type in ("pointlight", "spotlight"):
+        obj = bpy.data.objects.new(display_name, None)
+        obj.empty_display_type = 'PLAIN_AXES'
+        collection.objects.link(obj)
+        
+        l_type = 'POINT' if node.type == "pointlight" else 'SPOT'
+        light_data = bpy.data.lights.new(name=display_name + "_Data", type=l_type)
+        light_obj = bpy.data.objects.new(display_name + "_Light", light_data)
+        collection.objects.link(light_obj)
+        light_obj.parent = obj
+        
+        # Spotlights, like cameras, point downwards by default and need offset
+        if l_type == 'SPOT':
+            light_obj.rotation_mode = 'XYZ'
+            light_obj.rotation_euler = (math.pi/2, 0, math.pi)
+            
+        for i in range(3):
+            light_obj.lock_location[i] = True
+            light_obj.lock_rotation[i] = True
+            light_obj.lock_scale[i] = True
+                
     elif node.type == "audio":
         obj = bpy.data.objects.new(display_name, None)
         obj.empty_display_type = 'SPHERE'
@@ -506,6 +617,9 @@ def _build_tree(node, parent_obj, collection, start_frame, fps_scale, object_map
     if node.keyframes:
         kf_trans = _apply_keyframes(obj, node, start_frame, fps_scale, disable_scale=disable_scale)
         _apply_interpolation_to_obj(obj, kf_trans)
+        
+    if node.type in ("pointlight", "spotlight") and obj.children:
+        _apply_light_properties(obj.children[0], node, start_frame, fps_scale)
 
     # Recurse children (skip children of char nodes — Rig2 handles their motion)
     if node.type != "char":
