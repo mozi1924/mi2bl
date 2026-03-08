@@ -140,7 +140,9 @@ def create_mi_cube(name="MI_Cube", size=1.0, size_3d=None, rot_point=None, colle
         grid["X+"], grid["X-"] = grid["X-"], grid["X+"]
 
     for face in bm.faces:
-        normal = face.normal
+        # Simulating -90 degree X-axis rotation of the object for UV mapping
+        rot_mat = Matrix.Rotation(math.radians(-90.0), 3, 'X')
+        normal = rot_mat @ face.normal
         face_key = None
 
         # BL Z+ = MI Y+, BL Z- = MI Y-, BL Y+ = MI Z+, BL Y- = MI Z-
@@ -153,25 +155,26 @@ def create_mi_cube(name="MI_Cube", size=1.0, size_3d=None, rot_point=None, colle
 
         for loop in face.loops:
             co = loop.vert.co
-            # MI coords: mi_x_n = co.x/s+0.5, mi_y_n = co.z/s+0.5, mi_z_n = co.y/s+0.5
+            uv_co = rot_mat @ co
+            # MI coords: mi_x_n = uv_co.x/s+0.5, mi_y_n = uv_co.z/s+0.5, mi_z_n = uv_co.y/s+0.5
             if face_key == "Y+": # Top: u=mi_x_n, v=1-mi_z_n
-                u_loc = (co.x / bl_scale.x) + 0.5
-                v_loc = 0.5 - (co.y / bl_scale.y)
+                u_loc = (uv_co.x / bl_scale.x) + 0.5
+                v_loc = 0.5 - (uv_co.y / bl_scale.y)
             elif face_key == "Y-": # Bottom: u=1-mi_x_n, v=1-mi_z_n
-                u_loc = 0.5 - (co.x / bl_scale.x)
-                v_loc = 0.5 - (co.y / bl_scale.y)
+                u_loc = 0.5 - (uv_co.x / bl_scale.x)
+                v_loc = 0.5 - (uv_co.y / bl_scale.y)
             elif face_key == "X+": # Right: u=1-mi_y_n, v=1-mi_z_n
-                u_loc = 0.5 - (co.z / bl_scale.z)
-                v_loc = 0.5 - (co.y / bl_scale.y)
+                u_loc = 0.5 - (uv_co.z / bl_scale.z)
+                v_loc = 0.5 - (uv_co.y / bl_scale.y)
             elif face_key == "X-": # Left: u=mi_y_n, v=1-mi_z_n
-                u_loc = (co.z / bl_scale.z) + 0.5
-                v_loc = 0.5 - (co.y / bl_scale.y)
+                u_loc = (uv_co.z / bl_scale.z) + 0.5
+                v_loc = 0.5 - (uv_co.y / bl_scale.y)
             elif face_key == "Z+": # Front: u=mi_x_n, v=mi_y_n
-                u_loc = (co.x / bl_scale.x) + 0.5
-                v_loc = (co.z / bl_scale.z) + 0.5
+                u_loc = (uv_co.x / bl_scale.x) + 0.5
+                v_loc = (uv_co.z / bl_scale.z) + 0.5
             elif face_key == "Z-": # Back: u=mi_x_n, v=1-mi_y_n
-                u_loc = (co.x / bl_scale.x) + 0.5
-                v_loc = 0.5 - (co.z / bl_scale.z)
+                u_loc = (uv_co.x / bl_scale.x) + 0.5
+                v_loc = 0.5 - (uv_co.z / bl_scale.z)
             else:
                 u_loc, v_loc = 0.5, 0.5
 
