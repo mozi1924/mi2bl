@@ -1,16 +1,10 @@
-from . import mesh_gen
-from . import miobject_parser
-from . import scene_importer
-from . import object_importer
-from . import object_panel
-from . import core
-
+from .importers import scene_importer, object_importer
+from .ui import object_panel
 
 def register():
     scene_importer.register()
     object_importer.register()
     object_panel.register()
-
 
 def unregister():
     scene_importer.unregister()

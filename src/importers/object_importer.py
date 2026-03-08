@@ -5,8 +5,8 @@ import math
 import re
 from mathutils import Euler, Vector
 
-from . import core
-from .core import MIBaseImporter, apply_mi_transition
+from ..utils import core
+from ..utils.core import MIBaseImporter, apply_mi_transition
 
 # --- Constants ---
 MI_SCALE = 1.0 / 16.0
