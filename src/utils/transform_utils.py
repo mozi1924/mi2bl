@@ -33,92 +33,129 @@ def _apply_default_transform(obj, node, disable_scale=False):
 
 
 def _hex_to_rgb(hex_val):
-    if isinstance(hex_val, (int, float)):
-        hex_val = int(hex_val)
-        r = ((hex_val >> 16) & 0xFF) / 255.0
-        g = ((hex_val >> 8) & 0xFF) / 255.0
-        b = (hex_val & 0xFF) / 255.0
+    if isinstance(hex_val, str):
+        hex_str = hex_val.lstrip('#')
+        if not hex_str:
+            return (1.0, 1.0, 1.0)
+        try:
+            hex_int = int(hex_str, 16)
+        except ValueError:
+            return (1.0, 1.0, 1.0)
+        r = ((hex_int >> 16) & 0xFF) / 255.0
+        g = ((hex_int >> 8) & 0xFF) / 255.0
+        b = (hex_int & 0xFF) / 255.0
+        return (r, g, b)
+    elif isinstance(hex_val, (int, float)):
+        hex_int = int(hex_val)
+        r = ((hex_int >> 16) & 0xFF) / 255.0
+        g = ((hex_int >> 8) & 0xFF) / 255.0
+        b = (hex_int & 0xFF) / 255.0
         return (r, g, b)
     return (1.0, 1.0, 1.0)
 
 def _apply_light_properties(light_obj, node, start_frame, fps_scale):
-    """Apply light properties and keyframes."""
+    """Apply light properties and keyframes based on Mine-imator logic."""
     l_data = light_obj.data
     dv = node.default_values
     
-    # MI light defaults
-    MI_DEFAULT_COLOR = 16777215
-    MI_DEFAULT_STRENGTH = 1.0
-    MI_DEFAULT_SPEC_STRENGTH = 1.0
-    MI_DEFAULT_SIZE = 16.0
-    MI_DEFAULT_RANGE = 250.0
-    MI_DEFAULT_SPOT_RADIUS = 45.0
-    MI_DEFAULT_SPOT_SHARPNESS = 0.5
+    # 常量定义
+    # MI_SCALE = 1.0 / 16.0 (Already defined globally)
+    # 亮度修正系数：用于将 MI 的非物理强度转换为 Blender 的 Watts
+    # 经验值：50.0 到 100.0 之间通常能获得较好的初始效果
+    POWER_MULTIPLIER = 80.0 
 
-    def get_val(values, key, default):
-        return values.get(key, default)
+    # 1. Colour (颜色) - MI 不支持色温，直接转换 Hex
+    def get_rgb(val):
+        return _hex_to_rgb(val)
+
+    # 2. Radius (半径)
+    def get_radius(size_val):
+        return size_val * MI_SCALE
+
+    # 3. Power (功率) - 结合强度和范围
+    def get_energy(strength, l_range):
+        """
+        修正后的能量计算公式 (防止数值爆炸)
+        逻辑：
+        1. 基础功率：Strength * 100W (MI的默认强度1.0对应100W灯泡)
+        2. 距离补偿：不再使用平方，改为线性补偿。每增加1米范围，增加约 5W - 10W 的功率。
+        这样即使范围很大，数值也只会线性增长，不会指数爆炸。
+        """
+        dist_meters = l_range * MI_SCALE
         
-    def _calc_energy(strength, l_range):
-        # Calculate a reasonable Watts energy based on Strength and Range
-        # A flat multiplier of 5000 * strength usually matches visible scale, 
-        # but factoring in range gives more physically accurate falloff equivalence.
-        distance_meters = l_range * MI_SCALE
-        return strength * (distance_meters ** 2) * 50.0 + (strength * 1000.0)
-
-    # helper to set and keyframe property if present
-    def process_frames():
-        # First gather all frame times including frame 0 for default
-        frames = set(node.keyframes.keys()) if node.keyframes else set()
-        frames.add(0) # ensure base frame
+        # 基础亮度 (Watts)
+        base_power = strength * 50.0 
         
-        for frame_num in sorted(frames):
-            time = start_frame + (frame_num * fps_scale)
-            if frame_num == 0:
-                values = dict(dv)
-                if node.keyframes and 0 in node.keyframes:
-                    values.update(node.keyframes[0])
-            else:
-                values = node.keyframes.get(frame_num, {})
-            
-            # Set properties (using MI defaults if missing on frame 0)
-            if "LIGHT_COLOR" in values or frame_num == 0:
-                l_data.color = _hex_to_rgb(get_val(values, "LIGHT_COLOR", MI_DEFAULT_COLOR))
-                l_data.keyframe_insert("color", frame=time)
-                
-            if "LIGHT_STRENGTH" in values or "LIGHT_RANGE" in values or frame_num == 0:
-                strength = get_val(values, "LIGHT_STRENGTH", MI_DEFAULT_STRENGTH)
-                l_range = get_val(values, "LIGHT_RANGE", MI_DEFAULT_RANGE)
-                l_data.energy = _calc_energy(strength, l_range)
-                l_data.keyframe_insert("energy", frame=time)
-                
-            if "LIGHT_SPECULAR_STRENGTH" in values or frame_num == 0:
-                l_data.specular_factor = get_val(values, "LIGHT_SPECULAR_STRENGTH", MI_DEFAULT_SPEC_STRENGTH)
-                l_data.keyframe_insert("specular_factor", frame=time)
-                
-            # Point/Spot properties
-            if "LIGHT_SIZE" in values or frame_num == 0:
-                l_data.shadow_soft_size = get_val(values, "LIGHT_SIZE", MI_DEFAULT_SIZE) * MI_SCALE
-                l_data.keyframe_insert("shadow_soft_size", frame=time)
-                
-            if "LIGHT_RANGE" in values or frame_num == 0:
-                l_data.cutoff_distance = get_val(values, "LIGHT_RANGE", MI_DEFAULT_RANGE) * MI_SCALE
-                l_data.keyframe_insert("cutoff_distance", frame=time)
-                if hasattr(l_data, "use_custom_distance"):
-                    l_data.use_custom_distance = True
+        # 距离增益 (防止远距离看不见，但也不要太亮)
+        # 例如：Range 250 (15米) -> 增益 150W -> 总共 200W (合理)
+        # 例如：Range 1000 (62米) -> 增益 620W -> 总共 670W (合理)
+        range_boost = dist_meters * 10.0 * strength
+        
+        return (base_power + range_boost) * 10.0
 
-            # Spot specific properties
-            if l_data.type == 'SPOT':
-                if "LIGHT_SPOT_RADIUS" in values or frame_num == 0:
-                    l_data.spot_size = math.radians(get_val(values, "LIGHT_SPOT_RADIUS", MI_DEFAULT_SPOT_RADIUS) * 2.0)
-                    l_data.keyframe_insert("spot_size", frame=time)
-                    
-                if "LIGHT_SPOT_SHARPNESS" in values or frame_num == 0:
-                    sharp = get_val(values, "LIGHT_SPOT_SHARPNESS", MI_DEFAULT_SPOT_SHARPNESS)
-                    blend = max(0.0, min(1.0, 1.0 - sharp))
-                    l_data.spot_blend = blend
-                    l_data.keyframe_insert("spot_blend", frame=time)
+    # 4. Spot Shape (聚光灯形状)
+    def get_spot_size(radius_val):
+        # MI 的 radius 通常指半角或特定比例，Blender 需要全角弧度
+        # 假设 MI 数据是角度值 (Degrees)
+        return math.radians(radius_val * 2.0)
 
-    process_frames()
+    def get_spot_blend(sharpness_val):
+        # MI Sharpness: 1.0 (锐利) -> 0.0 (柔和)
+        # Blender Blend: 0.0 (锐利) -> 1.0 (柔和)
+        return 1.0 - max(0.0, min(1.0, sharpness_val))
+
+    # --- 关键帧与默认值处理逻辑 ---
+    frames = set(node.keyframes.keys()) if node.keyframes else set()
+    frames.add(0)
+
+    for frame_num in sorted(frames):
+        time = start_frame + (frame_num * fps_scale)
+        # 获取当前帧数值
+        if frame_num == 0:
+            current_values = dict(dv)
+            if node.keyframes and 0 in node.keyframes:
+                current_values.update(node.keyframes[0])
+        else:
+            current_values = node.keyframes.get(frame_num, {})
+
+        # 应用 Power & Range
+        # 默认 Strength 为 1.0, 默认 Range 为 250
+        s = float(current_values.get("LIGHT_STRENGTH", 1.0))
+        r = float(current_values.get("LIGHT_RANGE", 250.0))
+        
+        # 1. 设置 Power (Energy)
+        l_data.energy = get_energy(s, r)
+        l_data.keyframe_insert("energy", frame=time)
+        
+        # 2. 设置物理截断距离 (Cutoff)
+        # 这一点非常重要：让 Blender 真的在那个距离把光切断，而不是靠无限增加亮度来模拟
+        l_data.use_custom_distance = True
+        l_data.cutoff_distance = r * MI_SCALE
+        l_data.keyframe_insert("cutoff_distance", frame=time)
+
+        # 3. 设置 Color
+        if "LIGHT_COLOR" in current_values or frame_num == 0:
+            c_val = current_values.get("LIGHT_COLOR", "#FFFFFF")
+            l_data.color = get_rgb(c_val)
+            l_data.keyframe_insert("color", frame=time)
+
+        # 应用 Radius
+        if "LIGHT_SIZE" in current_values or frame_num == 0:
+            sz = current_values.get("LIGHT_SIZE", 0.0)
+            l_data.shadow_soft_size = get_radius(sz) # Eevee/Cycles通用半径
+            l_data.keyframe_insert("shadow_soft_size", frame=time)
+
+        # 应用聚光灯特有参数
+        if l_data.type == 'SPOT':
+            if any(k in current_values for k in ["LIGHT_SPOT_RADIUS", "LIGHT_SPOT_SHARPNESS"]) or frame_num == 0:
+                spot_r = current_values.get("LIGHT_SPOT_RADIUS", 45.0)
+                spot_s = current_values.get("LIGHT_SPOT_SHARPNESS", 0.5)
+                
+                l_data.spot_size = get_spot_size(spot_r)
+                l_data.spot_blend = get_spot_blend(spot_s)
+                l_data.keyframe_insert("spot_size", frame=time)
+                l_data.keyframe_insert("spot_blend", frame=time)
+
 
 
 
