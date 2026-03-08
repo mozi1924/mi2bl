@@ -82,7 +82,7 @@ def fill_defaults(values):
     values.setdefault("TRANSITION", "linear")
     return values
 
-def parse_mi_file_data(data):
+def parse_mi_file_data(data, char_index=0):
     """Normalizes .miframes and .miobject JSON data into a uniform structure."""
     if "keyframes" in data and isinstance(data["keyframes"], list):
         for kf in data["keyframes"]:
@@ -98,14 +98,17 @@ def parse_mi_file_data(data):
     primary_id = None
     is_model = False
     primary_template = {}
-    for t in timelines:
-        if t.get("type") == "char":
-            tmpl = template_map.get(t.get("temp", ""), {})
-            if tmpl.get("model", {}).get("name") == "human":
-                primary_id = t.get("id")
-                is_model = True
-                primary_template = tmpl
-                break
+    human_chars = [
+        t for t in timelines
+        if t.get("type") == "char"
+        and template_map.get(t.get("temp", ""), {}).get("model", {}).get("name") == "human"
+    ]
+    if human_chars:
+        idx = min(char_index, len(human_chars) - 1)
+        t = human_chars[idx]
+        primary_id = t.get("id")
+        is_model = True
+        primary_template = template_map.get(t.get("temp", ""), {})
             
     if not is_model:
         for t in timelines:
@@ -175,13 +178,13 @@ def parse_mi_file_data(data):
 class MIBaseImporter:
     """Shared Mine-Imator import logic for all operators."""
     
-    def check_file(self, filepath):
+    def check_file(self, filepath, char_index=0):
         if not filepath or not os.path.exists(filepath):
             return None, "File not found."
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 raw_data = json.load(f)
-                return parse_mi_file_data(raw_data), None
+                return parse_mi_file_data(raw_data, char_index=char_index), None
         except Exception as e:
             return None, f"JSON Error: {str(e)}"
 

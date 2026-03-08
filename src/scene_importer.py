@@ -56,33 +56,37 @@ def _miobject_has_character(filepath):
     return False
 
 
-def _find_character_parent_anchor_id(filepath, supported_node_ids):
+def _find_all_char_anchors(filepath, supported_node_ids):
     """
-    Find the nearest ancestor of a character timeline that exists in imported
-    supported nodes (folder/cube/surface). Returns timeline id or None.
+    Return a list of anchor_ids (one per char timeline), in timeline order.
+    Each entry is the nearest ancestor id present in supported_node_ids, or None.
     """
     try:
         with open(filepath, "r", encoding="utf-8") as fh:
             data = json.load(fh)
     except Exception:
-        return None
+        return []
 
     timelines = data.get("timelines", [])
     by_id = {tl.get("id"): tl for tl in timelines}
+    result = []
 
     for tl in timelines:
         if tl.get("type") != "char":
             continue
+        anchor_id = None
         parent_id = tl.get("parent")
         while parent_id and parent_id != "root":
             if parent_id in supported_node_ids:
-                return parent_id
+                anchor_id = parent_id
+                break
             parent = by_id.get(parent_id)
             if not parent:
                 break
             parent_id = parent.get("parent")
+        result.append(anchor_id)
 
-    return None
+    return result
 
 
 def _char_parent_chain_has_scale(filepath, anchor_id):
@@ -119,30 +123,32 @@ def _char_parent_chain_has_scale(filepath, anchor_id):
     return False
 
 
-def _append_rig2_and_get_armature(context):
+def _append_rig2_armatures(context, count):
+    """Append `count` Rig2 rigs and return list of newly-added armatures."""
     if not _operator_exists("rig2.append_rig"):
         return None, "Rig2 addon not available (operator rig2.append_rig not found)"
 
     existing = {obj.name for obj in bpy.data.objects if obj.type == 'ARMATURE'}
+    new_armatures = []
 
-    result = bpy.ops.rig2.append_rig()
-    if 'FINISHED' not in result:
-        return None, "rig2.append_rig failed"
+    for _ in range(count):
+        result = bpy.ops.rig2.append_rig()
+        if 'FINISHED' not in result:
+            return None, "rig2.append_rig failed"
+        # Find the armature added in this iteration
+        for obj in bpy.data.objects:
+            if obj.type == 'ARMATURE' and obj.name not in existing and _is_rig2_armature(obj):
+                # Make armature data single-user so multiple rigs don't share pose bone properties
+                if obj.data.users > 1:
+                    obj.data = obj.data.copy()
+                new_armatures.append(obj)
+                existing.add(obj.name)
+                break
 
-    # Prefer newly-added Rig2 armature, fall back to current active armature.
-    for obj in bpy.data.objects:
-        if obj.type == 'ARMATURE' and obj.name not in existing and _is_rig2_armature(obj):
-            return obj, None
+    if len(new_armatures) != count:
+        return None, f"Expected {count} Rig2 armatures, got {len(new_armatures)}"
 
-    active = context.view_layer.objects.active
-    if _is_rig2_armature(active):
-        return active, None
-
-    for obj in bpy.data.objects:
-        if _is_rig2_armature(obj):
-            return obj, None
-
-    return None, "Rig2 appended but no Rig2 armature found"
+    return new_armatures, None
 
 
 def _pick_parent_anchor(root_objects):
@@ -479,9 +485,10 @@ def _build_tree(node, parent_obj, collection, start_frame, fps_scale, object_map
         kf_trans = _apply_keyframes(obj, node, start_frame, fps_scale, disable_scale=disable_scale)
         _apply_interpolation_to_obj(obj, kf_trans)
 
-    # Recurse children
-    for child in node.children:
-        _build_tree(child, obj, collection, start_frame, fps_scale, object_map, disable_scale_node_ids)
+    # Recurse children (skip children of char nodes — Rig2 handles their motion)
+    if node.type != "char":
+        for child in node.children:
+            _build_tree(child, obj, collection, start_frame, fps_scale, object_map, disable_scale_node_ids)
     return obj
 
 
@@ -590,46 +597,38 @@ class MI_OT_ImportMiobjectScene(bpy.types.Operator):
 
         rig2_status = None
         if self.auto_append_rig2 and has_character_timeline:
-            rig2_armature, err = _append_rig2_and_get_armature(context)
+            char_anchors = _find_all_char_anchors(
+                self.filepath, set(imported_object_map.keys())
+            ) if imported_object_map else []
+            char_count = max(len(char_anchors), 1)
+
+            armatures, err = _append_rig2_armatures(context, char_count)
             if err:
                 rig2_status = f"Rig2: {err}"
             else:
-                rig2_status = "Rig2: appended"
-                anchor = None
-                anchor_id = None
-                if imported_object_map and has_character_timeline:
-                    anchor_id = _find_character_parent_anchor_id(
-                        self.filepath,
-                        set(imported_object_map.keys()),
-                    )
-                    if anchor_id:
-                        anchor = imported_object_map.get(anchor_id)
-                if anchor is None:
-                    anchor = _pick_parent_anchor(imported_root_objects)
-                if anchor:
-                    try:
-                        has_scale_chain = _char_parent_chain_has_scale(self.filepath, anchor_id)
-                        if has_scale_chain:
-                            _bind_childof_follow(rig2_armature, anchor)
-                            rig2_status += f", bound(child-of) to '{anchor.name}'"
-                        else:
-                            _parent_keep_world(rig2_armature, anchor)
-                            rig2_status += f", parented to '{anchor.name}'"
-                    except Exception as exc:
-                        rig2_status += f", parent failed ({exc})"
-                if self.auto_import_rig2_action and has_character_timeline:
-                    ok, import_err = _import_with_rig2_miframes(
-                        context,
-                        rig2_armature,
-                        self.filepath,
-                        self.start_frame,
-                    )
-                    if ok:
-                        rig2_status += ", character action imported via Rig2 miframes"
-                    else:
-                        rig2_status += f", miframes import failed ({import_err})"
-                elif self.auto_import_rig2_action:
-                    rig2_status += ", no character timeline found"
+                rig2_status = f"Rig2: appended {char_count}"
+                for i, rig2_armature in enumerate(armatures):
+                    anchor_id = char_anchors[i] if i < len(char_anchors) else None
+                    anchor = imported_object_map.get(anchor_id) if anchor_id else None
+                    if anchor is None:
+                        anchor = _pick_parent_anchor(imported_root_objects)
+                    if anchor:
+                        try:
+                            has_scale_chain = _char_parent_chain_has_scale(self.filepath, anchor_id)
+                            if has_scale_chain:
+                                _bind_childof_follow(rig2_armature, anchor)
+                            else:
+                                _parent_keep_world(rig2_armature, anchor)
+                        except Exception as exc:
+                            rig2_status += f", parent[{i}] failed ({exc})"
+                    if self.auto_import_rig2_action:
+                        if hasattr(rig2_armature, "rig2_props"):
+                            rig2_armature.rig2_props.mi_char_index = i
+                        ok, import_err = _import_with_rig2_miframes(
+                            context, rig2_armature, self.filepath, self.start_frame,
+                        )
+                        if not ok:
+                            rig2_status += f", miframes[{i}] failed ({import_err})"
 
         elif self.auto_append_rig2 and not has_character_timeline:
             rig2_status = "Rig2: skipped (no character timeline)"
