@@ -369,20 +369,34 @@ def _create_blender_object(node, collection):
     # Try to grab dimensions and texture data if template mapping exists
     size_3d = (16.0, 16.0, 16.0)
     uv = (0.0, 0.0)
+    uv_repeat = (1.0, 1.0)
     texture_size = (64.0, 64.0)
-    texture_mirror = False
+    texture_mirror = (False, False) # h, v
+    mapped = False
+    invert = False
     
     if hasattr(node, "template_data") and node.template_data:
-        t_uv = node.template_data.get("uv", [0, 0])
-        uv = tuple(t_uv) if isinstance(t_uv, list) else (0, 0)
+        # Blocks use top-level fields
+        t_uv = node.template_data.get("uv", [0.0, 0.0])
+        uv = tuple(t_uv) if isinstance(t_uv, list) else (0.0, 0.0)
         
-        t_ts = node.template_data.get("texture_size", [64, 64])
-        texture_size = tuple(t_ts) if isinstance(t_ts, list) else (64, 64)
+        t_ts = node.template_data.get("texture_size", [64.0, 64.0])
+        texture_size = tuple(t_ts) if isinstance(t_ts, list) else (64.0, 64.0)
         
-        texture_mirror = node.template_data.get("tex_hmirror", False)
+        texture_mirror = (node.template_data.get("tex_hmirror", False), 
+                          node.template_data.get("tex_vmirror", False))
         
         t_sz = node.template_data.get("size", [16.0, 16.0, 16.0])
         size_3d = tuple(t_sz) if isinstance(t_sz, list) else (16.0, 16.0, 16.0)
+
+        # Cubes and Surfaces use "shape" object for these
+        shape = node.template_data.get("shape", {})
+        if shape:
+            mapped = shape.get("tex_mapped", False)
+            invert = shape.get("invert", False)
+            uv = (shape.get("tex_hoffset", 0.0), shape.get("tex_voffset", 0.0))
+            uv_repeat = (shape.get("tex_hrepeat", 1.0), shape.get("tex_vrepeat", 1.0))
+            texture_mirror = (shape.get("tex_hmirror", False), shape.get("tex_vmirror", False))
 
     if node.type == "folder":
         obj = bpy.data.objects.new(display_name, None)  # Empty
@@ -393,12 +407,17 @@ def _create_blender_object(node, collection):
     elif node.type == "cube":
         obj = mesh_gen.create_mi_cube(name=display_name, size=1.0, 
                                       rot_point=getattr(node, "rot_point", [0,-8,0]),
-                                      collection=collection)
+                                      collection=collection,
+                                      mapped=mapped, uv_offset=uv, uv_repeat=uv_repeat,
+                                      hmirror=texture_mirror[0], vmirror=texture_mirror[1],
+                                      invert=invert)
 
     elif node.type == "surface":
         obj = mesh_gen.create_mi_surface(name=display_name, size=1.0, size_3d=(size_3d[0], size_3d[2]), 
                                          rot_point=getattr(node, "rot_point", [0,-8,0]),
-                                         collection=collection, uv=uv, texture_size=texture_size)
+                                         collection=collection, uv_offset=uv, uv_repeat=uv_repeat, 
+                                         texture_size=texture_size,
+                                         hmirror=texture_mirror[0], vmirror=texture_mirror[1])
 
     elif node.type == "block":
         obj = mesh_gen.create_mi_block(name=display_name, size_3d=size_3d, 
