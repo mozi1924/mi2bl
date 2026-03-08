@@ -61,6 +61,13 @@ class MI_PT_ObjectAnimPanel(MI_PT_ObjectAnimBase, bpy.types.Panel):
         # --- Import Action ---
         box = layout.box()
         box.label(text="Import", icon='IMPORT')
+
+        # CTA for Rig2 if it's not installed
+        has_rig2 = hasattr(bpy.ops, "mi") and hasattr(bpy.ops.mi, "import_action")
+        
+        if not has_rig2:
+            box.label(text="Rig2 not found. Install for characters.", icon='INFO')
+
         box.operator("mi.import_object_action",
                       text="Load Anim (.mi*)", icon='FILE_TICK')
 

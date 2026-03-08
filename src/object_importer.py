@@ -5,13 +5,8 @@ import math
 import re
 from mathutils import Euler, Vector
 
-# Reuse the easing map and transition applicator from the character importer
-try:
-    from . import configs
-    from .importer import MI_TO_BLENDER_EASING_MAP, apply_mi_transition, MIBaseImporter
-except (ImportError, ValueError):
-    import configs
-    from importer import MI_TO_BLENDER_EASING_MAP, apply_mi_transition, MIBaseImporter
+from . import core
+from .core import MIBaseImporter, apply_mi_transition
 
 # --- Constants ---
 MI_SCALE = 1.0 / 16.0
@@ -46,18 +41,18 @@ class MI_OT_ImportObjectAction(bpy.types.Operator, MIBaseImporter):
         # Validate that this is a non-model miframes file
         is_model = data.get("is_model", True)
         if is_model:
-            self.report({'WARNING'},
-                        "This file is marked as a model animation. "
-                        "Use the Rig2 character importer instead.")
-            return {'CANCELLED'}
+            # If it's a character model, we SHOULD use Rig2.
+            # We can check if Rig2 is installed and suggest it.
+            if hasattr(bpy.ops, "mi") and hasattr(bpy.ops.mi, "import_action"):
+                self.report({'WARNING'},
+                            "This file is a character model. Using Rig2 importer instead.")
+                return bpy.ops.mi.import_action('INVOKE_DEFAULT', filepath=self.filepath)
+            else:
+                self.report({'ERROR'},
+                            "This file is a character model. Please install Rig2 to import character animations.")
+                return {'CANCELLED'}
 
-        ext = os.path.splitext(self.filepath)[1].lower()
-        if not is_model and ext == ".miframes" and not self.confirmed:
-            bpy.ops.mi.import_confirm_dialog('INVOKE_DEFAULT', 
-                filepath=self.filepath, 
-                op_type="OBJECT")
-            return {'CANCELLED'}
-
+        # --- Timing ---
         tempo, fps_current, fps_scale = self.setup_scene(
             context, data, 
             obj.mi_object_props.start_frame, 
@@ -67,15 +62,6 @@ class MI_OT_ImportObjectAction(bpy.types.Operator, MIBaseImporter):
 
         # Collect transition info per keyframe time for later curve adjustment
         kf_trans_list = []
-
-        # --- World-space coordinate conversion ---
-        # Mine-Imator UI (After bug fix): X=Right, Y=Up, Z=Depth
-        # Blender World: X=Right, Y=Depth, Z=Up
-        #
-        # Mapping UI values to Blender World:
-        #   Blender X = UI X
-        #   Blender Y = UI Z (Depth)
-        #   Blender Z = UI Y (Up)
 
         for kf in data.get("keyframes", []):
             time = start_frame + (kf.get("position", 0) * fps_scale)
@@ -92,8 +78,6 @@ class MI_OT_ImportObjectAction(bpy.types.Operator, MIBaseImporter):
             }
             kf_trans_list.append((time, t_info))
 
-            context.scene.frame_set(int(round(time)))
-
             # --- Position ---
             has_pos = False
             loc = list(obj.location)
@@ -101,10 +85,10 @@ class MI_OT_ImportObjectAction(bpy.types.Operator, MIBaseImporter):
                 loc[0] = values["POS_X"] * MI_SCALE
                 has_pos = True
             if "POS_Z" in values:
-                loc[1] = -values["POS_Z"] * MI_SCALE     # UI Z (Depth) -> Blender -Y
+                loc[1] = -values["POS_Z"] * MI_SCALE
                 has_pos = True
             if "POS_Y" in values:
-                loc[2] = values["POS_Y"] * MI_SCALE     # UI Y (Up) -> Blender Z
+                loc[2] = values["POS_Y"] * MI_SCALE
                 has_pos = True
             if has_pos:
                 obj.location = (loc[0], loc[1], loc[2])
@@ -118,11 +102,10 @@ class MI_OT_ImportObjectAction(bpy.types.Operator, MIBaseImporter):
                 rot_vals[0] = math.radians(values["ROT_X"])
                 has_rot = True
             if "ROT_Z" in values:
-                rot_vals[1] = math.radians(-values["ROT_Z"])  # UI Z (Roll) -> Blender -Y
+                rot_vals[1] = math.radians(-values["ROT_Z"])
                 has_rot = True
             if "ROT_Y" in values:
-                rot_vals[2] = math.radians(values["ROT_Y"])  # UI Y (Yaw) -> Blender Z
-                has_rot = True
+                rot_vals[2] = math.radians(values["ROT_Y"])
             if has_rot:
                 obj.rotation_mode = 'XYZ'
                 obj.rotation_euler = Euler((rot_vals[0], rot_vals[1], rot_vals[2]), 'XYZ')
@@ -135,20 +118,19 @@ class MI_OT_ImportObjectAction(bpy.types.Operator, MIBaseImporter):
                 scl[0] = values["SCA_X"]
                 has_scl = True
             if "SCA_Z" in values:
-                scl[1] = values["SCA_Z"]   # UI Z (Depth) -> Blender Y
+                scl[1] = values["SCA_Z"]
                 has_scl = True
             if "SCA_Y" in values:
-                scl[2] = values["SCA_Y"]   # UI Y (Up) -> Blender Z
+                scl[2] = values["SCA_Y"]
                 has_scl = True
             if has_scl:
                 obj.scale = (scl[0], scl[1], scl[2])
                 obj.keyframe_insert("scale", frame=time)
 
-        # --- Apply Interpolation & Bezier Ease ---
+        # --- Apply Interpolation ---
         if obj.animation_data and obj.animation_data.action:
             action = obj.animation_data.action
             for fcurve in action.fcurves:
-                # Only process direct object transforms
                 if fcurve.data_path in ("location", "rotation_euler", "scale"):
                     self.apply_interpolation(fcurve, kf_trans_list)
 
@@ -158,3 +140,25 @@ class MI_OT_ImportObjectAction(bpy.types.Operator, MIBaseImporter):
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
+
+# --- Registration ---
+
+classes = (
+    MI_OT_ImportObjectAction,
+)
+
+
+def register():
+    for cls in classes:
+        try:
+            bpy.utils.register_class(cls)
+        except Exception:
+            pass
+
+
+def unregister():
+    for cls in reversed(classes):
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            pass

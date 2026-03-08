@@ -15,12 +15,11 @@ from mathutils import Euler, Matrix
 from . import miobject_parser
 from . import mesh_gen
 
-# Reuse easing helpers from miframes
-from .miframes_bridge import importer as _mi_imp
+from . import core
 
-MI_TO_BLENDER_EASING_MAP = _mi_imp.MI_TO_BLENDER_EASING_MAP
-apply_mi_transition = _mi_imp.apply_mi_transition
-MIBaseImporter = _mi_imp.MIBaseImporter
+MI_TO_BLENDER_EASING_MAP = core.MI_TO_BLENDER_EASING_MAP
+apply_mi_transition = core.apply_mi_transition
+MIBaseImporter = core.MIBaseImporter
 
 # --- Constants ---
 MI_SCALE = 1.0 / 16.0
@@ -668,11 +667,23 @@ classes = (
 
 def register():
     for cls in classes:
-        bpy.utils.register_class(cls)
-    bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
+        try:
+            bpy.utils.register_class(cls)
+        except Exception:
+            pass
+    try:
+        bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
+    except Exception:
+        pass
 
 
 def unregister():
-    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+    try:
+        bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+    except Exception:
+        pass
     for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            pass
