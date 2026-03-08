@@ -366,6 +366,24 @@ def _create_blender_object(node, collection):
     """
     display_name = node.display_name
 
+    # Try to grab dimensions and texture data if template mapping exists
+    size_3d = (16.0, 16.0, 16.0)
+    uv = (0.0, 0.0)
+    texture_size = (64.0, 64.0)
+    texture_mirror = False
+    
+    if hasattr(node, "template_data") and node.template_data:
+        t_uv = node.template_data.get("uv", [0, 0])
+        uv = tuple(t_uv) if isinstance(t_uv, list) else (0, 0)
+        
+        t_ts = node.template_data.get("texture_size", [64, 64])
+        texture_size = tuple(t_ts) if isinstance(t_ts, list) else (64, 64)
+        
+        texture_mirror = node.template_data.get("tex_hmirror", False)
+        
+        t_sz = node.template_data.get("size", [16.0, 16.0, 16.0])
+        size_3d = tuple(t_sz) if isinstance(t_sz, list) else (16.0, 16.0, 16.0)
+
     if node.type == "folder":
         obj = bpy.data.objects.new(display_name, None)  # Empty
         obj.empty_display_type = 'PLAIN_AXES'
@@ -373,12 +391,48 @@ def _create_blender_object(node, collection):
         collection.objects.link(obj)
 
     elif node.type == "cube":
-        obj = mesh_gen.create_mi_cube(name=display_name, size=1.0, rot_point=getattr(node, "rot_point", [0,-8,0]),
-                                       collection=collection)
+        obj = mesh_gen.create_mi_cube(name=display_name, size=1.0, 
+                                      rot_point=getattr(node, "rot_point", [0,-8,0]),
+                                      collection=collection)
 
     elif node.type == "surface":
-        obj = mesh_gen.create_mi_surface(name=display_name, size=1.0, rot_point=getattr(node, "rot_point", [0,-8,0]),
-                                          collection=collection)
+        obj = mesh_gen.create_mi_surface(name=display_name, size=1.0, size_3d=(size_3d[0], size_3d[2]), 
+                                         rot_point=getattr(node, "rot_point", [0,-8,0]),
+                                         collection=collection, uv=uv, texture_size=texture_size)
+
+    elif node.type == "block":
+        obj = mesh_gen.create_mi_block(name=display_name, size_3d=size_3d, 
+                                       rot_point=getattr(node, "rot_point", None),
+                                       collection=collection, uv=uv, texture_size=texture_size, 
+                                       texture_mirror=texture_mirror)
+    elif node.type == "camera":
+        # Create a Blender Camera Object setup properly
+        cam_data = bpy.data.cameras.new(display_name + "_Cam")
+        obj = bpy.data.objects.new(display_name, cam_data)
+        collection.objects.link(obj)
+        # Attempt to inject properties
+        if hasattr(node, "keyframes") and 0 in node.keyframes:
+            f0 = node.keyframes[0]
+            if "CAM_FOV" in f0:
+                cam_data.angle = math.radians(f0["CAM_FOV"])
+                
+    elif node.type == "audio":
+        obj = bpy.data.objects.new(display_name, None)
+        obj.empty_display_type = 'SPHERE'
+        collection.objects.link(obj)
+        
+    elif node.type == "text":
+        text_data = bpy.data.curves.new(type="FONT", name=display_name + "_TextData")
+        text_data.body = display_name # placeholder text until properly hooked
+        obj = bpy.data.objects.new(display_name, text_data)
+        collection.objects.link(obj)
+    
+    elif node.type in ["char", "scenery", "item", "bodypart", "particle_spawner"]:
+        # Character Root/Groups / Folders placeholder
+        obj = bpy.data.objects.new(display_name, None)
+        obj.empty_display_type = 'PLAIN_AXES'
+        collection.objects.link(obj)
+        
     else:
         # Unsupported – create an empty as placeholder
         obj = bpy.data.objects.new(display_name, None)
@@ -501,9 +555,9 @@ class MI_OT_ImportMiobjectScene(bpy.types.Operator):
             if self.use_collection:
                 col_name = os.path.splitext(os.path.basename(self.filepath))[0]
                 collection = bpy.data.collections.new(col_name)
-                context.scene.collection.children.link(collection)
+                context.collection.children.link(collection)
             else:
-                collection = context.scene.collection
+                collection = context.collection
 
             imported_root_objects = []
             imported_object_map = {}

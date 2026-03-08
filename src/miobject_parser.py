@@ -47,7 +47,7 @@ def _fill_defaults(values):
 
 # ---- Data Classes ----------------------------------------------------------
 
-SUPPORTED_TYPES = {"folder", "cube", "surface"}
+SUPPORTED_TYPES = {"folder", "cube", "surface", "block", "char", "camera", "audio", "bodypart", "text", "scenery", "item", "particle_spawner"}
 
 
 class MINode:
@@ -59,14 +59,18 @@ class MINode:
         "default_values", "keyframes",
         "inherit",
         "children",
-        "rot_point"
+        "rot_point",
+        "template_data"
     )
 
-    def __init__(self, tl_dict):
+    def __init__(self, tl_dict, templates_dict=None):
+        if templates_dict is None:
+            templates_dict = {}
         self.id = tl_dict.get("id", "")
         self.type = tl_dict.get("type", "")
         self.name = tl_dict.get("name", "")
         self.temp = tl_dict.get("temp", "null")  # template id
+        self.template_data = templates_dict.get(self.temp, {})
 
         self.parent_id = tl_dict.get("parent", "root")
         self.parent_tree_index = tl_dict.get("parent_tree_index", 0)
@@ -138,6 +142,9 @@ def parse_miobject(filepath_or_data):
         "created_in": data.get("created_in", ""),
     }
 
+    raw_templates = data.get("templates", [])
+    templates_dict = {t.get("id"): t for t in raw_templates}
+
     timelines = data.get("timelines", [])
 
     # Build flat node dict (only supported types)
@@ -146,7 +153,7 @@ def parse_miobject(filepath_or_data):
         tl_type = tl.get("type", "")
         if tl_type not in SUPPORTED_TYPES:
             continue
-        node = MINode(tl)
+        node = MINode(tl, templates_dict=templates_dict)
         all_nodes[node.id] = node
 
     # Link children to parents (sort by parent_tree_index)
