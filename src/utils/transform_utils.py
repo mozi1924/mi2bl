@@ -54,107 +54,130 @@ def _hex_to_rgb(hex_val):
     return (1.0, 1.0, 1.0)
 
 def _apply_light_properties(light_obj, node, start_frame, fps_scale):
-    """Apply light properties and keyframes based on Mine-imator logic."""
+    """Apply light properties and keyframes based on Mine-imator logic.
+    
+    MI 灯光属性默认值（来自 tl_value_default.gml）：
+      LIGHT_COLOR         = c_white (#FFFFFF)
+      LIGHT_STRENGTH      = 1.0
+      LIGHT_SPECULAR_STRENGTH = 1.0
+      LIGHT_SIZE          = 2.0   (注意：不是 0！)
+      LIGHT_RANGE         = 250.0
+      LIGHT_FADE_SIZE     = 0.5
+      LIGHT_SPOT_RADIUS   = 50.0  (注意：不是 45！)
+      LIGHT_SPOT_SHARPNESS = 0.5
+    """
     l_data = light_obj.data
     dv = node.default_values
-    
-    # 常量定义
-    # MI_SCALE = 1.0 / 16.0 (Already defined globally)
-    # 亮度修正系数：用于将 MI 的非物理强度转换为 Blender 的 Watts
-    # 经验值：50.0 到 100.0 之间通常能获得较好的初始效果
-    POWER_MULTIPLIER = 80.0 
 
-    # 1. Colour (颜色) - MI 不支持色温，直接转换 Hex
-    def get_rgb(val):
-        return _hex_to_rgb(val)
+    # ── 辅助函数 ──────────────────────────────────────────────────────────────
 
-    # 2. Radius (半径)
-    def get_radius(size_val):
-        return size_val * MI_SCALE
-
-    # 3. Power (功率) - 结合强度和范围
     def get_energy(strength, l_range):
         """
-        修正后的能量计算公式 (防止数值爆炸)
-        逻辑：
-        1. 基础功率：Strength * 100W (MI的默认强度1.0对应100W灯泡)
-        2. 距离补偿：不再使用平方，改为线性补偿。每增加1米范围，增加约 5W - 10W 的功率。
-        这样即使范围很大，数值也只会线性增长，不会指数爆炸。
+        MI → Blender 能量换算。
+        MI 使用非物理衰减，Blender Cycles/Eevee 默认使用平方反比衰减。
+        为了让默认灯（strength=1, range=250 MI单位 ≈ 15.6 m）在 Blender 中
+        产生肉眼合理的亮度，使用以下公式：
+          energy = strength * (range_m ^ 2) * 4π
+        这与平方反比衰减在截断距离边界产生约 1 lux 照度时的 Watts 等价。
+        系数 *1.0 是可调倍率，根据渲染引擎/场景按需缩放。
         """
-        dist_meters = l_range * MI_SCALE
-        
-        # 基础亮度 (Watts)
-        base_power = strength * 50.0 
-        
-        # 距离增益 (防止远距离看不见，但也不要太亮)
-        # 例如：Range 250 (15米) -> 增益 150W -> 总共 200W (合理)
-        # 例如：Range 1000 (62米) -> 增益 620W -> 总共 670W (合理)
-        range_boost = dist_meters * 10.0 * strength
-        
-        return (base_power + range_boost) * 10.0
+        range_m = l_range * MI_SCALE          # MI units → Blender meters
+        # 平方律等效：在截断距离的边缘, E = P/(4π r²) ≈ 1 lux
+        # → P = 4π r² * strength_factor
+        energy = strength * (range_m ** 2) * 4.0 * math.pi
+        # 可调缩放系数（1.0 = 保持物理值，可由用户乘以倍率调亮/调暗）
+        return max(0.0, energy)
 
-    # 4. Spot Shape (聚光灯形状)
+    def get_radius(size_val):
+        """MI LIGHT_SIZE（MI单位）→ Blender shadow_soft_size（米）"""
+        return max(0.0, size_val * MI_SCALE)
+
     def get_spot_size(radius_val):
-        # MI 的 radius 通常指半角或特定比例，Blender 需要全角弧度
-        # 假设 MI 数据是角度值 (Degrees)
-        return math.radians(radius_val * 2.0)
+        """
+        MI LIGHT_SPOT_RADIUS 是光锥**半角**（度数）。
+        Blender spot_size 是光锥**全角**（弧度）。
+        → spot_size = radians(radius_val * 2)
+        并且 Blender 要求 spot_size ∈ (0, π]。
+        """
+        return max(0.0001, min(math.pi, math.radians(radius_val * 2.0)))
 
     def get_spot_blend(sharpness_val):
-        # MI Sharpness: 1.0 (锐利) -> 0.0 (柔和)
-        # Blender Blend: 0.0 (锐利) -> 1.0 (柔和)
+        """
+        MI LIGHT_SPOT_SHARPNESS: 1.0=锐利边缘, 0.0=柔和边缘。
+        Blender spot_blend:      0.0=锐利边缘, 1.0=柔和边缘。
+        → blend = 1.0 - clamp(sharpness, 0, 1)
+        """
         return 1.0 - max(0.0, min(1.0, sharpness_val))
 
-    # --- 关键帧与默认值处理逻辑 ---
+    # ── use_custom_distance 只需设置一次，不可插关键帧 ──────────────────────
+    l_data.use_custom_distance = True
+
+    # ── 构建需要处理的帧集合 ──────────────────────────────────────────────────
+    # frame_num=0 始终作为"初始静态帧"处理（使用 default_values 作为基础）。
+    # 对于没有关键帧的灯光，只插入 frame 0 静态值。
     frames = set(node.keyframes.keys()) if node.keyframes else set()
     frames.add(0)
 
+    # 构建一个"累积值"字典：每帧从 default_values 出发，叠加该帧关键帧数据。
+    # 这样即使某一帧只存了 LIGHT_RANGE，其他属性（颜色/强度）也不会丢失。
+    base_values = {
+        "LIGHT_COLOR":           dv.get("LIGHT_COLOR",           16777215),  # c_white
+        "LIGHT_STRENGTH":        dv.get("LIGHT_STRENGTH",        1.0),
+        "LIGHT_SPECULAR_STRENGTH": dv.get("LIGHT_SPECULAR_STRENGTH", 1.0),
+        "LIGHT_SIZE":            dv.get("LIGHT_SIZE",            2.0),       # GML 默认 2
+        "LIGHT_RANGE":           dv.get("LIGHT_RANGE",           250.0),
+        "LIGHT_FADE_SIZE":       dv.get("LIGHT_FADE_SIZE",       0.5),
+        "LIGHT_SPOT_RADIUS":     dv.get("LIGHT_SPOT_RADIUS",     50.0),      # GML 默认 50
+        "LIGHT_SPOT_SHARPNESS":  dv.get("LIGHT_SPOT_SHARPNESS",  0.5),
+    }
+
     for frame_num in sorted(frames):
         time = start_frame + (frame_num * fps_scale)
-        # 获取当前帧数值
-        if frame_num == 0:
-            current_values = dict(dv)
-            if node.keyframes and 0 in node.keyframes:
-                current_values.update(node.keyframes[0])
-        else:
-            current_values = node.keyframes.get(frame_num, {})
 
-        # 应用 Power & Range
-        # 默认 Strength 为 1.0, 默认 Range 为 250
-        s = float(current_values.get("LIGHT_STRENGTH", 1.0))
-        r = float(current_values.get("LIGHT_RANGE", 250.0))
-        
-        # 1. 设置 Power (Energy)
+        # 合并：base_values ← 该帧关键帧覆盖
+        if frame_num == 0:
+            # frame 0：default_values 已在 base_values 中，再叠加 kf[0]（若存在）
+            cv = dict(base_values)
+            if node.keyframes and 0 in node.keyframes:
+                cv.update(node.keyframes[0])
+        else:
+            # 其他帧：从 base_values 继承所有字段，然后用该帧数据覆盖
+            cv = dict(base_values)
+            cv.update(node.keyframes.get(frame_num, {}))
+
+        # ── 1. Energy（功率）──────────────────────────────────────────────────
+        s = float(cv.get("LIGHT_STRENGTH", 1.0))
+        r = float(cv.get("LIGHT_RANGE",    250.0))
         l_data.energy = get_energy(s, r)
         l_data.keyframe_insert("energy", frame=time)
-        
-        # 2. 设置物理截断距离 (Cutoff)
-        # 这一点非常重要：让 Blender 真的在那个距离把光切断，而不是靠无限增加亮度来模拟
-        l_data.use_custom_distance = True
+
+        # ── 2. Cutoff Distance（物理截断距离）────────────────────────────────
         l_data.cutoff_distance = r * MI_SCALE
         l_data.keyframe_insert("cutoff_distance", frame=time)
 
-        # 3. 设置 Color
-        if "LIGHT_COLOR" in current_values or frame_num == 0:
-            c_val = current_values.get("LIGHT_COLOR", "#FFFFFF")
-            l_data.color = get_rgb(c_val)
-            l_data.keyframe_insert("color", frame=time)
+        # ── 3. Color（颜色）──────────────────────────────────────────────────
+        c_val = cv.get("LIGHT_COLOR", 16777215)
+        l_data.color = _hex_to_rgb(c_val)
+        l_data.keyframe_insert("color", frame=time)
 
-        # 应用 Radius
-        if "LIGHT_SIZE" in current_values or frame_num == 0:
-            sz = current_values.get("LIGHT_SIZE", 0.0)
-            l_data.shadow_soft_size = get_radius(sz) # Eevee/Cycles通用半径
-            l_data.keyframe_insert("shadow_soft_size", frame=time)
+        # ── 4. Shadow Soft Size（阴影半径）───────────────────────────────────
+        sz = float(cv.get("LIGHT_SIZE", 2.0))
+        l_data.shadow_soft_size = get_radius(sz)
+        l_data.keyframe_insert("shadow_soft_size", frame=time)
 
-        # 应用聚光灯特有参数
+        # ── 5. Specular Factor（高光因子）────────────────────────────────────
+        spec = float(cv.get("LIGHT_SPECULAR_STRENGTH", 1.0))
+        l_data.specular_factor = max(0.0, spec)
+        l_data.keyframe_insert("specular_factor", frame=time)
+
+        # ── 6. Spot 专属参数 ──────────────────────────────────────────────────
         if l_data.type == 'SPOT':
-            if any(k in current_values for k in ["LIGHT_SPOT_RADIUS", "LIGHT_SPOT_SHARPNESS"]) or frame_num == 0:
-                spot_r = current_values.get("LIGHT_SPOT_RADIUS", 45.0)
-                spot_s = current_values.get("LIGHT_SPOT_SHARPNESS", 0.5)
-                
-                l_data.spot_size = get_spot_size(spot_r)
-                l_data.spot_blend = get_spot_blend(spot_s)
-                l_data.keyframe_insert("spot_size", frame=time)
-                l_data.keyframe_insert("spot_blend", frame=time)
+            spot_r = float(cv.get("LIGHT_SPOT_RADIUS",    50.0))
+            spot_s = float(cv.get("LIGHT_SPOT_SHARPNESS",  0.5))
+            l_data.spot_size  = get_spot_size(spot_r)
+            l_data.spot_blend = get_spot_blend(spot_s)
+            l_data.keyframe_insert("spot_size",  frame=time)
+            l_data.keyframe_insert("spot_blend", frame=time)
 
 
 def _apply_camera_shake(pivot_obj, node):
@@ -401,10 +424,20 @@ def _apply_interpolation_to_obj(obj, kf_trans_list):
     action = obj.animation_data.action
     for fcurve in action.fcurves:
         # Include camera and light properties for interpolation
-        if fcurve.data_path in ("location", "rotation_euler", "scale", 
-                                "lens", "energy", "spot_size", "spot_blend",
-                                "dof.focus_distance", "dof.aperture_fstop", 
-                                "dof.aperture_rotation", "dof.aperture_ratio", "shadow_soft_size"):
+        # cutoff_distance、color、shadow_soft_size、specular_factor 均为灯光可动画属性
+        if fcurve.data_path in (
+            # 变换
+            "location", "rotation_euler", "scale",
+            # 摄像机镜头
+            "lens",
+            "dof.focus_distance", "dof.aperture_fstop",
+            "dof.aperture_rotation", "dof.aperture_ratio",
+            # 灯光通用
+            "energy", "color", "shadow_soft_size", "specular_factor",
+            "cutoff_distance",
+            # 聚光灯专属
+            "spot_size", "spot_blend",
+        ):
             # Walk keyframe pairs
             for i in range(1, len(fcurve.keyframe_points)):
                 kf0 = fcurve.keyframe_points[i - 1]

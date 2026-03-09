@@ -83,8 +83,13 @@ class MINode:
         raw_kf = tl_dict.get("keyframes", {})
         self.keyframes = {}
         for frame_str, vals in raw_kf.items():
-            fixed = _fill_defaults(dict(vals))
-            self.keyframes[int(frame_str)] = fix_mi_yz_swap(fixed)
+            # 必须先 fix_mi_yz_swap，再 _fill_defaults！
+            # 原因：_fill_defaults 补入的 POS_Y/POS_Z 等默认值本身就是"正确的"值（即已经是
+            # 正确的 UI 坐标系），若先 fill 再 swap，这些 fill 进去的默认值会被再次反转，
+            # 导致 POS_Y=0 → POS_Z=0 产生双重错误。
+            swapped = fix_mi_yz_swap(dict(vals))
+            fixed = _fill_defaults(swapped)
+            self.keyframes[int(frame_str)] = fixed
 
         # inherit flags (position, rotation, scale, etc.)
         self.inherit = tl_dict.get("inherit", {})

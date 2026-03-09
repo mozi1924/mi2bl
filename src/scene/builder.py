@@ -107,7 +107,9 @@ def _create_blender_object(node, collection):
         collection.objects.link(light_obj)
         light_obj.parent = obj
         
-        # Spotlights, like cameras, point downwards by default and need offset
+        # 点光源是全向光，不需要旋转偏移。
+        # 聚光灯在 MI 中旋转=0 时朝南方(-Y in BL)，而 Blender 聚光灯默认朝-Z。
+        # 需要与摄像机相同的偏移：X=+90°, Z=+180° 来对齐 MI 默认朝向。
         if l_type == 'SPOT':
             light_obj.rotation_mode = 'XYZ'
             light_obj.rotation_euler = (math.pi/2, 0, math.pi)
