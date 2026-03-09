@@ -157,6 +157,166 @@ def _apply_light_properties(light_obj, node, start_frame, fps_scale):
                 l_data.keyframe_insert("spot_blend", frame=time)
 
 
+def _apply_camera_shake(pivot_obj, node):
+    """
+    Apply camera shake as Noise modifiers on the pivot object's rotation F-curves.
+    """
+    dv = node.default_values
+    if not dv.get("CAM_SHAKE", False):
+        return
+        
+    # Shake strengths (MI uses degrees)
+    # Mapping: MI X -> Pivot X, MI Z -> Pivot Y (-rz), MI Y -> Pivot Z (ry)
+    sh_strengths = [
+        dv.get("CAM_SHAKE_STRENGTH_X", 1.0),
+        dv.get("CAM_SHAKE_STRENGTH_Z", 1.0), 
+        dv.get("CAM_SHAKE_STRENGTH_Y", 1.0)
+    ]
+    
+    # Shake speeds
+    sh_speeds = [
+        dv.get("CAM_SHAKE_SPEED_X", 1.0),
+        dv.get("CAM_SHAKE_SPEED_Z", 1.0),
+        dv.get("CAM_SHAKE_SPEED_Y", 1.0)
+    ]
+
+    if not pivot_obj.animation_data or not pivot_obj.animation_data.action:
+        # Create a dummy action if none exists so we can add modifiers
+        pivot_obj.animation_data_create()
+        pivot_obj.animation_data.action = bpy.data.actions.new(name=pivot_obj.name + "_Shake")
+
+    action = pivot_obj.animation_data.action
+    for i in range(3):
+        strength = sh_strengths[i]
+        if strength <= 0: continue
+        
+        # Ensure fcurve exists
+        fcurve = action.fcurves.find("rotation_euler", index=i)
+        if not fcurve:
+            fcurve = action.fcurves.new("rotation_euler", index=i)
+            # Find existing rotation or use current
+            fcurve.keyframe_points.insert(0, pivot_obj.rotation_euler[i])
+
+        # Add Noise modifier
+        mod = fcurve.modifiers.new('NOISE')
+        mod.amplitude = math.radians(strength)
+        
+        # Scaling Frequency: Higher MI speed = smaller Blender scale.
+        # Default speed 1.0 -> Scale 5.0 seems reasonable.
+        speed = max(0.01, sh_speeds[i])
+        mod.scale = 5.0 / speed 
+        
+        # Phase offset to avoid synchronized shaking
+        mod.phase = i * 100.0
+
+
+def _apply_camera_properties(cam_lens_obj, node, start_frame, fps_scale):
+    """
+    Apply camera-specific lens properties and keyframes.
+    cam_lens_obj: The actual Blender Camera object (the "Lens" object).
+    node: The MINode for the camera.
+    """
+    cam_data = cam_lens_obj.data
+    dv = node.default_values
+    
+    # 1. Set sensor fit to Vertical to match MI's FOV behavior
+    cam_data.sensor_fit = 'VERTICAL'
+
+    # 2. Keyframe Processing
+    frames = set(node.keyframes.keys()) if node.keyframes else set()
+    frames.add(0)
+
+    for frame_num in sorted(frames):
+        time = start_frame + (frame_num * fps_scale)
+        if frame_num == 0:
+            # Use default_values, then override with keyframe 0 if it exists
+            current_values = dict(dv)
+            if node.keyframes and 0 in node.keyframes:
+                current_values.update(node.keyframes[0])
+        else:
+            current_values = node.keyframes.get(frame_num, {})
+
+        # --- Lens Properties ---
+        
+        # FOV (Mine-imator uses vertical FOV)
+        if "CAM_FOV" in current_values or frame_num == 0:
+            fov = current_values.get("CAM_FOV", 45.0)
+            cam_data.angle = math.radians(fov)
+            cam_data.keyframe_insert("lens", frame=time)
+
+        # Depth of Field Toggle
+        if "CAM_DOF" in current_values or frame_num == 0:
+            cam_data.dof.use_dof = bool(current_values.get("CAM_DOF", False))
+            cam_data.dof.keyframe_insert("use_dof", frame=time)
+
+        # Focus Distance
+        if any(k in current_values for k in ["CAM_DOF_DEPTH", "CAM_ROTATE_DISTANCE"]) or frame_num == 0:
+            # If CAM_DOF_DEPTH is 0 or missing, it often follows rotate distance
+            depth = current_values.get("CAM_DOF_DEPTH", 0.0)
+            if depth <= 0:
+                depth = current_values.get("CAM_ROTATE_DISTANCE", 100.0)
+            cam_data.dof.focus_distance = depth * MI_SCALE
+            cam_data.dof.keyframe_insert("focus_distance", frame=time)
+
+        # Blur Size -> F-stop mapping (Heuristic)
+        # MI blur_size (0.0 to 1.0+). Lower f-stop = more blur.
+        if "CAM_DOF_BLUR_SIZE" in current_values or frame_num == 0:
+            blur = current_values.get("CAM_DOF_BLUR_SIZE", 0.01)
+            fstop = 128.0
+            if blur > 0:
+                # Heuristic: 0.01 -> ~20 f-stop, 0.1 -> ~2.0 f-stop, 1.0 -> ~0.2 f-stop
+                fstop = 1.0 / (blur * 5.0)
+            cam_data.dof.aperture_fstop = max(0.1, min(128.0, fstop))
+            cam_data.dof.keyframe_insert("aperture_fstop", frame=time)
+
+        # Aperture Blades & Rotation
+        if "CAM_BLADE_AMOUNT" in current_values or frame_num == 0:
+            cam_data.dof.aperture_blades = int(current_values.get("CAM_BLADE_AMOUNT", 0))
+            cam_data.dof.keyframe_insert("aperture_blades", frame=time)
+        
+        if "CAM_BLADE_ANGLE" in current_values or frame_num == 0:
+            rot = math.radians(current_values.get("CAM_BLADE_ANGLE", 0.0))
+            cam_data.dof.aperture_rotation = rot
+            cam_data.dof.keyframe_insert("aperture_rotation", frame=time)
+            
+        if "CAM_DOF_BLUR_RATIO" in current_values or frame_num == 0:
+            ratio = current_values.get("CAM_DOF_BLUR_RATIO", 1.0)
+            cam_data.dof.aperture_ratio = ratio
+            cam_data.dof.keyframe_insert("aperture_ratio", frame=time)
+
+        # --- Orbit / Rotate Distance ---
+        # This affects the location of the lens object relative to its parent (the pivot)
+        if "CAM_ROTATE_DISTANCE" in current_values or frame_num == 0:
+            dist = current_values.get("CAM_ROTATE_DISTANCE", 0.0)
+            # Blender camera looks at -Z. So to be "away" from pivot, it moves in local +Z.
+            cam_lens_obj.location[2] = dist * MI_SCALE
+            cam_lens_obj.keyframe_insert("location", index=2, frame=time)
+
+    # --- Post-Keyframe Pass (e.g. Shake) ---
+    if cam_lens_obj.parent:
+        _apply_camera_shake(cam_lens_obj.parent, node)
+
+    # --- Scene-wide Settings (Apply based on frame 0/default) ---
+    f0_values = dict(dv)
+    if node.keyframes and 0 in node.keyframes:
+        f0_values.update(node.keyframes[0])
+    
+    # Resolution
+    if not f0_values.get("CAM_SIZE_USE_PROJECT", True):
+        bpy.context.scene.render.resolution_x = int(f0_values.get("CAM_WIDTH", 1280))
+        bpy.context.scene.render.resolution_y = int(f0_values.get("CAM_HEIGHT", 720))
+
+    # Exposure
+    if "CAM_EXPOSURE" in f0_values:
+        val = f0_values.get("CAM_EXPOSURE", 1.0)
+        bpy.context.scene.view_settings.exposure = math.log2(max(0.01, val))
+
+    # Gamma (MI 2.2 is Neutral/Standard. Blender 1.0 is standard for AgX/Filmic)
+    if "CAM_GAMMA" in f0_values:
+        gamma = f0_values.get("CAM_GAMMA", 2.2)
+        bpy.context.scene.view_settings.gamma = gamma / 2.2
+
+
 
 
 def _apply_keyframes(obj, node, start_frame, fps_scale, disable_scale=False):
@@ -240,7 +400,11 @@ def _apply_interpolation_to_obj(obj, kf_trans_list):
         return
     action = obj.animation_data.action
     for fcurve in action.fcurves:
-        if fcurve.data_path in ("location", "rotation_euler", "scale"):
+        # Include camera and light properties for interpolation
+        if fcurve.data_path in ("location", "rotation_euler", "scale", 
+                                "lens", "energy", "spot_size", "spot_blend",
+                                "dof.focus_distance", "dof.aperture_fstop", 
+                                "dof.aperture_rotation", "dof.aperture_ratio", "shadow_soft_size"):
             # Walk keyframe pairs
             for i in range(1, len(fcurve.keyframe_points)):
                 kf0 = fcurve.keyframe_points[i - 1]

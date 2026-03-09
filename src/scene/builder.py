@@ -1,7 +1,7 @@
 import bpy
 import math
 from ..scene import mesh_gen
-from ..utils.transform_utils import _apply_default_transform, _apply_light_properties, _apply_keyframes, _apply_interpolation_to_obj
+from ..utils.transform_utils import _apply_default_transform, _apply_light_properties, _apply_camera_properties, _apply_keyframes, _apply_interpolation_to_obj
 
 def _create_blender_object(node, collection):
     """
@@ -94,11 +94,7 @@ def _create_blender_object(node, collection):
             cam_obj.lock_rotation[i] = True
             cam_obj.lock_scale[i] = True
             
-        # Attempt to inject properties
-        if hasattr(node, "keyframes") and 0 in node.keyframes:
-            f0 = node.keyframes[0]
-            if "CAM_FOV" in f0:
-                cam_data.angle = math.radians(f0["CAM_FOV"])
+        # Camera specific properties are applied in _build_tree via _apply_camera_properties
                 
     elif node.type in ("pointlight", "spotlight"):
         obj = bpy.data.objects.new(display_name, None)
@@ -162,12 +158,22 @@ def _build_tree(node, parent_obj, collection, start_frame, fps_scale, object_map
     _apply_default_transform(obj, node, disable_scale=disable_scale)
 
     # Apply keyframe animation
+    kf_trans = []
     if node.keyframes:
         kf_trans = _apply_keyframes(obj, node, start_frame, fps_scale, disable_scale=disable_scale)
         _apply_interpolation_to_obj(obj, kf_trans)
         
-    if node.type in ("pointlight", "spotlight") and obj.children:
-        _apply_light_properties(obj.children[0], node, start_frame, fps_scale)
+    if obj.children:
+        child = obj.children[0]
+        if node.type in ("pointlight", "spotlight"):
+            _apply_light_properties(child, node, start_frame, fps_scale)
+            if kf_trans:
+                _apply_interpolation_to_obj(child, kf_trans)
+
+        if node.type == "camera":
+            _apply_camera_properties(child, node, start_frame, fps_scale)
+            if kf_trans:
+                _apply_interpolation_to_obj(child, kf_trans)
 
     # Recurse children (skip children of char nodes — Rig2 handles their motion)
     if node.type != "char":
