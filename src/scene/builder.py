@@ -1,7 +1,15 @@
 import bpy
 import math
 from ..scene import mesh_gen
-from ..utils.transform_utils import _apply_default_transform, _apply_light_properties, _apply_camera_properties, _apply_keyframes, _apply_interpolation_to_obj
+from ..utils.transform_utils import (
+    _apply_default_transform,
+    _apply_light_properties,
+    _apply_camera_properties,
+    _apply_keyframes,
+    _apply_interpolation_to_obj,
+    _apply_mi_custom_props,
+    _MI_NODE_CUSTOM_PROP_REGISTRY,
+)
 
 def _create_blender_object(node, collection):
     """
@@ -164,18 +172,47 @@ def _build_tree(node, parent_obj, collection, start_frame, fps_scale, object_map
     if node.keyframes:
         kf_trans = _apply_keyframes(obj, node, start_frame, fps_scale, disable_scale=disable_scale)
         _apply_interpolation_to_obj(obj, kf_trans)
-        
+
+    # ── Unified custom properties ──────────────────────────────────────────
+    # For node types whose custom-prop registry entry targets the *pivot* object
+    # (i.e. all types except camera/light which use a child object), write props
+    # directly onto `obj` here.
+    # Camera and light custom props are written onto their child objects below.
+    _pivot_custom_prop_types = {
+        "folder", "cube", "surface", "block", "audio", "text", "char",
+        "scenery", "item", "bodypart", "particle_spawner",
+    }
+    if node.type in _pivot_custom_prop_types:
+        reg = _MI_NODE_CUSTOM_PROP_REGISTRY.get(node.type)
+        if reg is not None:
+            scalar_defs, color_defs = reg
+            # Only write if there are actually props to write (avoids no-op passes)
+            if scalar_defs or color_defs:
+                _apply_mi_custom_props(obj, node, start_frame, fps_scale,
+                                       scalar_defs=scalar_defs,
+                                       color_defs=color_defs)
+
     if obj.children:
         child = obj.children[0]
         if node.type in ("pointlight", "spotlight"):
             _apply_light_properties(child, node, start_frame, fps_scale)
             if kf_trans:
                 _apply_interpolation_to_obj(child, kf_trans)
+            # Write any MI-only light custom props onto the light child object
+            reg = _MI_NODE_CUSTOM_PROP_REGISTRY.get(node.type)
+            if reg is not None:
+                scalar_defs, color_defs = reg
+                if scalar_defs or color_defs:
+                    _apply_mi_custom_props(child, node, start_frame, fps_scale,
+                                           scalar_defs=scalar_defs,
+                                           color_defs=color_defs)
 
         if node.type == "camera":
             _apply_camera_properties(child, node, start_frame, fps_scale)
             if kf_trans:
                 _apply_interpolation_to_obj(child, kf_trans)
+            # Camera custom props are already written inside _apply_camera_properties
+            # via _apply_mi_custom_props; no second call needed.
 
     # Recurse children (skip children of char nodes — Rig2 handles their motion)
     if node.type != "char":

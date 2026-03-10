@@ -7,6 +7,12 @@ MI_SCALE = 1.0 / 16.0
 apply_mi_transition = core.apply_mi_transition
 MIBaseImporter = core.MIBaseImporter
 
+# ─── Node-type → custom-prop registry dispatch ────────────────────────────────
+# Each entry maps an MI node type string to a (scalar_defs, color_defs) pair.
+# Add new node types here as their MI-specific props are discovered.
+# builder.py iterates this dict after building each object tree.
+_MI_NODE_CUSTOM_PROP_REGISTRY = {}   # populated after the defs below are declared
+
 def _apply_default_transform(obj, node, disable_scale=False):
     """Apply the default_values from MI as the object's rest transform."""
     dv = node.default_values
@@ -233,6 +239,298 @@ def _apply_camera_shake(pivot_obj, node):
         mod.phase = i * 100.0
 
 
+# ─── Unified MI Custom Properties System ──────────────────────────────────────
+#
+# Any MI node type can declare a "prop registry" — a pair of dicts:
+#   scalar_defs : {mi_key: default_float}
+#   color_defs  : {mi_key: (r, g, b)}
+#
+# These are stored as Blender custom properties on the target object with the
+# naming convention  "mi_<mi_key_lowercase>"  so they remain unique, searchable,
+# and driver-addressable across the whole file.
+#
+# All numeric props are ``float`` (keyframe-able).
+# Color props are ``list[float]`` [R, G, B] (IDPropertyArray, index-addressable).
+#
+# A shared description registry maps any mi_key → tooltip string.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Per-type scalar prop registries ───────────────────────────────────────────
+
+# Camera: MI-only properties that have no direct Blender equivalent
+_MI_CAMERA_SCALAR_PROPS = {
+    # Effect toggles (MI-only on/off switches)
+    "CAM_BLOOM":                   0.0,   # bool → float
+    "CAM_VIGNETTE":                0.0,
+    "CAM_CA":                      0.0,
+    # DoF (MI-specific)
+    "CAM_DOF_RANGE":               200.0,
+    "CAM_DOF_FADE_SIZE":           100.0,
+    "CAM_DOF_BIAS":                0.0,
+    "CAM_DOF_THRESHOLD":           0.0,
+    "CAM_DOF_GAIN":                0.0,
+    # Chromatic Aberration / Fringe
+    "CAM_DOF_FRINGE_RED":          1.0,
+    "CAM_DOF_FRINGE_GREEN":        1.0,
+    "CAM_DOF_FRINGE_BLUE":         1.0,
+    "CAM_DOF_FRINGE_ANGLE_RED":    90.0,
+    "CAM_DOF_FRINGE_ANGLE_GREEN": -135.0,
+    "CAM_DOF_FRINGE_ANGLE_BLUE":  -45.0,
+    # Bloom
+    "CAM_BLOOM_THRESHOLD":         0.85,
+    "CAM_BLOOM_INTENSITY":         0.4,
+    "CAM_BLOOM_RADIUS":            1.0,
+    "CAM_BLOOM_RATIO":             0.0,
+    # Lens Dirt
+    "CAM_LENS_DIRT_BLOOM":         1.0,   # bool → float
+    "CAM_LENS_DIRT_GLOW":          1.0,
+    "CAM_LENS_DIRT_RADIUS":        0.5,
+    "CAM_LENS_DIRT_INTENSITY":     0.8,
+    "CAM_LENS_DIRT_POWER":         1.5,
+    # Color Correction
+    "CAM_COLOR_CORRECTION":        0.0,   # bool → float
+    "CAM_CONTRAST":                0.0,
+    "CAM_BRIGHTNESS":              0.0,
+    "CAM_SATURATION":              1.0,
+    "CAM_VIBRANCE":                0.0,
+    # Film Grain
+    "CAM_GRAIN_STRENGTH":          0.10,
+    "CAM_GRAIN_SATURATION":        0.10,
+    "CAM_GRAIN_SIZE":              1.0,
+    # Vignette
+    "CAM_VIGNETTE_RADIUS":         1.0,
+    "CAM_VIGNETTE_SOFTNESS":       0.5,
+    "CAM_VIGNETTE_STRENGTH":       1.0,
+    # Chromatic Aberration (CA)
+    "CAM_CA_BLUR_AMOUNT":          0.05,
+    "CAM_CA_RED_OFFSET":           0.12,
+    "CAM_CA_GREEN_OFFSET":         0.08,
+    "CAM_CA_BLUE_OFFSET":          0.04,
+    # Distortion
+    "CAM_DISTORT_ZOOM_AMOUNT":     1.0,
+    "CAM_DISTORT_AMOUNT":          0.05,
+    # Misc
+    "CAM_SIZE_KEEP_ASPECT_RATIO":  1.0,   # bool → float
+    "CAM_SHAKE_MODE":              1.0,
+}
+
+# Camera: color properties (stored as [R, G, B] float arrays)
+_MI_CAMERA_COLOR_PROPS = {
+    "CAM_BLOOM_BLEND":    (1.0, 1.0, 1.0),  # c_white → [1,1,1]
+    "CAM_VIGNETTE_COLOR": (0.0, 0.0, 0.0),  # c_black → [0,0,0]
+    "CAM_COLOR_BURN":     (1.0, 1.0, 1.0),  # c_white → [1,1,1]
+}
+
+# ── Shared description registry (all node types) ───────────────────────────────
+# New entries for other node types should be added here, not in separate dicts.
+_MI_PROP_DESCRIPTIONS = {
+    # Camera props
+    "CAM_BLOOM":                   "MI: Bloom effect enabled (0.0=off, 1.0=on)",
+    "CAM_VIGNETTE":                "MI: Vignette effect enabled (0.0=off, 1.0=on)",
+    "CAM_CA":                      "MI: Chromatic aberration effect enabled (0.0=off, 1.0=on)",
+    "CAM_DOF_RANGE":               "MI: DoF in-focus range (MI units)",
+    "CAM_DOF_FADE_SIZE":           "MI: DoF fade/transition size (MI units)",
+    "CAM_DOF_BIAS":                "MI: DoF bias offset",
+    "CAM_DOF_THRESHOLD":           "MI: DoF blur threshold",
+    "CAM_DOF_GAIN":                "MI: DoF blur gain",
+    "CAM_DOF_FRINGE_RED":          "MI: Fringe (CA) strength – Red channel",
+    "CAM_DOF_FRINGE_GREEN":        "MI: Fringe (CA) strength – Green channel",
+    "CAM_DOF_FRINGE_BLUE":         "MI: Fringe (CA) strength – Blue channel",
+    "CAM_DOF_FRINGE_ANGLE_RED":    "MI: Fringe angle (deg) – Red channel",
+    "CAM_DOF_FRINGE_ANGLE_GREEN":  "MI: Fringe angle (deg) – Green channel",
+    "CAM_DOF_FRINGE_ANGLE_BLUE":   "MI: Fringe angle (deg) – Blue channel",
+    "CAM_BLOOM_THRESHOLD":         "MI: Bloom luminance threshold",
+    "CAM_BLOOM_INTENSITY":         "MI: Bloom intensity multiplier",
+    "CAM_BLOOM_RADIUS":            "MI: Bloom blur radius",
+    "CAM_BLOOM_RATIO":             "MI: Bloom aspect ratio",
+    "CAM_BLOOM_BLEND":             "MI: Bloom blend color [R, G, B]",
+    "CAM_LENS_DIRT_BLOOM":         "MI: Lens dirt applied to bloom (0.0=off, 1.0=on)",
+    "CAM_LENS_DIRT_GLOW":          "MI: Lens dirt applied to glow (0.0=off, 1.0=on)",
+    "CAM_LENS_DIRT_RADIUS":        "MI: Lens dirt radius",
+    "CAM_LENS_DIRT_INTENSITY":     "MI: Lens dirt intensity",
+    "CAM_LENS_DIRT_POWER":         "MI: Lens dirt power exponent",
+    "CAM_COLOR_CORRECTION":        "MI: Color correction enabled (0.0=off, 1.0=on)",
+    "CAM_CONTRAST":                "MI: Color correction – Contrast",
+    "CAM_BRIGHTNESS":              "MI: Color correction – Brightness",
+    "CAM_SATURATION":              "MI: Color correction – Saturation",
+    "CAM_VIBRANCE":                "MI: Color correction – Vibrance",
+    "CAM_COLOR_BURN":              "MI: Color correction – Burn color [R, G, B]",
+    "CAM_GRAIN_STRENGTH":          "MI: Film grain strength",
+    "CAM_GRAIN_SATURATION":        "MI: Film grain saturation",
+    "CAM_GRAIN_SIZE":              "MI: Film grain size",
+    "CAM_VIGNETTE_RADIUS":         "MI: Vignette radius",
+    "CAM_VIGNETTE_SOFTNESS":       "MI: Vignette softness",
+    "CAM_VIGNETTE_STRENGTH":       "MI: Vignette strength",
+    "CAM_VIGNETTE_COLOR":          "MI: Vignette color [R, G, B]",
+    "CAM_CA_BLUR_AMOUNT":          "MI: Chromatic aberration blur amount",
+    "CAM_CA_RED_OFFSET":           "MI: Chromatic aberration – Red channel offset",
+    "CAM_CA_GREEN_OFFSET":         "MI: Chromatic aberration – Green channel offset",
+    "CAM_CA_BLUE_OFFSET":          "MI: Chromatic aberration – Blue channel offset",
+    "CAM_DISTORT_ZOOM_AMOUNT":     "MI: Lens distortion zoom amount",
+    "CAM_DISTORT_AMOUNT":          "MI: Lens distortion amount",
+    "CAM_SIZE_KEEP_ASPECT_RATIO":  "MI: Keep aspect ratio (0.0=off, 1.0=on)",
+    "CAM_SHAKE_MODE":              "MI: Camera shake mode (0.0=off, 1.0=on)",
+    # ── Future node type props can be added here: ──────────────────────────
+    # e.g. "CUBE_OPACITY": "MI: Cube opacity (0.0=transparent, 1.0=opaque)",
+}
+
+
+def _coerce_to_float(value):
+    """Coerce a value from MI data to float for custom property storage.
+    bool → 0.0/1.0, int/float → float, other → 0.0.
+    """
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _apply_mi_custom_props(obj, node, start_frame, fps_scale,
+                           scalar_defs, color_defs=None):
+    """Store MI node properties as keyframe-able custom properties on any
+    Blender object.  This is the **unified** entry-point for all node types —
+    cameras, lights, cubes, folders, etc. — so that creators can access and
+    drive MI-specific data from within Blender.
+
+    Custom property naming convention:  ``mi_<mi_key_lowercase>``
+    e.g.  ``CAM_BLOOM``  →  ``mi_cam_bloom``
+
+    Scalar properties are stored as ``float`` (keyframe-able).
+    Color properties are stored as ``list[float]`` ``[R, G, B]``
+    (Blender IDPropertyArray; index-addressable in drivers).
+
+    Parameters
+    ----------
+    obj : bpy.types.Object
+        Target Blender object to receive the custom properties.
+    node : MINode
+        The parsed MI timeline node carrying ``default_values`` and
+        ``keyframes``.
+    start_frame : float
+        Blender frame number that corresponds to MI frame 0.
+    fps_scale : float
+        MI-to-Blender frame-rate ratio (blender_fps / mi_tempo).
+    scalar_defs : dict[str, float]
+        Mapping of MI property keys → their MI default float values.
+        All entries will be written as ``float`` custom properties.
+    color_defs : dict[str, tuple[float, float, float]] | None
+        Mapping of MI property keys → default (R, G, B) tuples.
+        These are hex-encoded in MI data and written as [R, G, B] arrays.
+        Pass ``None`` or ``{}`` when the node type has no color props.
+    """
+    if color_defs is None:
+        color_defs = {}
+
+    dv = node.default_values
+
+    # ── 1. Build base-value dicts from default_values (MI file) ───────────
+    base_scalar = {
+        mi_key: _coerce_to_float(dv.get(mi_key, default_val))
+        for mi_key, default_val in scalar_defs.items()
+    }
+
+    base_color = {}
+    for mi_key, default_rgb in color_defs.items():
+        raw = dv.get(mi_key, None)
+        base_color[mi_key] = list(_hex_to_rgb(raw)) if raw is not None \
+            else list(default_rgb)
+
+    # ── 2. Determine the set of frames to process ─────────────────────────
+    frames = set(node.keyframes.keys()) if node.keyframes else set()
+    frames.add(0)
+
+    props_initialised = False  # Create Blender UI metadata only on first frame
+
+    for frame_num in sorted(frames):
+        time = start_frame + (frame_num * fps_scale)
+
+        # Current-frame override values (keyframe data for this frame)
+        cv = dict(node.keyframes.get(frame_num, {})) if node.keyframes else {}
+
+        # ── 2a. Scalar properties ──────────────────────────────────────────
+        for mi_key, default_val in scalar_defs.items():
+            prop_name = "mi_" + mi_key.lower()
+            value = _coerce_to_float(cv[mi_key]) if mi_key in cv \
+                else base_scalar[mi_key]
+
+            obj[prop_name] = value
+
+            if not props_initialised:
+                desc = _MI_PROP_DESCRIPTIONS.get(mi_key, f"Mine-Imator: {mi_key}")
+                try:
+                    obj.id_properties_ui(prop_name).update(description=desc)
+                except Exception:
+                    pass
+
+            obj.keyframe_insert(f'["{prop_name}"]', frame=time)
+
+        # ── 2b. Color properties (float array [R,G,B]) ────────────────────
+        for mi_key, default_rgb in color_defs.items():
+            prop_name = "mi_" + mi_key.lower()
+            rgb = list(_hex_to_rgb(cv[mi_key])) if mi_key in cv \
+                else list(base_color[mi_key])
+
+            obj[prop_name] = rgb
+
+            if not props_initialised:
+                desc = _MI_PROP_DESCRIPTIONS.get(mi_key, f"Mine-Imator: {mi_key}")
+                try:
+                    obj.id_properties_ui(prop_name).update(
+                        description=desc, subtype='COLOR'
+                    )
+                except Exception:
+                    pass
+
+            # Keyframe each RGB channel independently
+            for ch in range(3):
+                obj.keyframe_insert(f'["{prop_name}"]', index=ch, frame=time)
+
+        props_initialised = True
+
+
+# ── Convenience alias kept for backwards-compatibility ────────────────────────
+# Callers that previously imported _apply_camera_custom_props directly will
+# still work; they simply receive _apply_mi_custom_props bound to the camera
+# scalar/color defs.
+def _apply_camera_custom_props(cam_lens_obj, node, start_frame, fps_scale):
+    """Backwards-compatible wrapper — delegates to _apply_mi_custom_props."""
+    _apply_mi_custom_props(
+        cam_lens_obj, node, start_frame, fps_scale,
+        scalar_defs=_MI_CAMERA_SCALAR_PROPS,
+        color_defs=_MI_CAMERA_COLOR_PROPS,
+    )
+
+
+# ── Populate the node-type dispatch registry ──────────────────────────────────
+# "camera" maps to the _Lens child object; the registry is consulted in
+# builder._build_tree for the *child* object (cam_obj / light_obj) so the
+# correct target object is already selected there.
+# For future node types add entries here:
+#   _MI_NODE_CUSTOM_PROP_REGISTRY["cube"]    = (_MI_CUBE_SCALAR_PROPS,   {})
+#   _MI_NODE_CUSTOM_PROP_REGISTRY["surface"] = (_MI_SURFACE_SCALAR_PROPS, {})
+#   etc.
+_MI_NODE_CUSTOM_PROP_REGISTRY.update({
+    "camera": (_MI_CAMERA_SCALAR_PROPS, _MI_CAMERA_COLOR_PROPS),
+    # pointlight / spotlight: the MI light scalar props that do not map
+    # to any native Blender light data-path are stored here so that they
+    # remain accessible and drivable by animators.
+    # (Currently empty — all MI light props are applied as native Blender
+    #  properties.  Future MI-only light props can be added below.)
+    "pointlight": ({}, {}),
+    "spotlight":  ({}, {}),
+    # Scene-graph containers / geometry nodes – no MI-only props yet.
+    "folder":   ({}, {}),
+    "cube":     ({}, {}),
+    "surface":  ({}, {}),
+    "block":    ({}, {}),
+    "audio":    ({}, {}),
+    "text":     ({}, {}),
+    "char":     ({}, {}),
+})
+
+
 def _apply_camera_properties(cam_lens_obj, node, start_frame, fps_scale):
     """
     Apply camera-specific lens properties and keyframes.
@@ -339,6 +637,9 @@ def _apply_camera_properties(cam_lens_obj, node, start_frame, fps_scale):
         gamma = f0_values.get("CAM_GAMMA", 2.2)
         bpy.context.scene.view_settings.gamma = gamma / 2.2
 
+    # --- Store MI-only properties as keyframe-able custom properties ---
+    _apply_camera_custom_props(cam_lens_obj, node, start_frame, fps_scale)
+
 
 
 
@@ -425,7 +726,9 @@ def _apply_interpolation_to_obj(obj, kf_trans_list):
     for fcurve in action.fcurves:
         # Include camera and light properties for interpolation
         # cutoff_distance、color、shadow_soft_size、specular_factor 均为灯光可动画属性
-        if fcurve.data_path in (
+        dp = fcurve.data_path
+        is_mi_custom = dp.startswith('["mi_')  # MI custom properties
+        if is_mi_custom or dp in (
             # 变换
             "location", "rotation_euler", "scale",
             # 摄像机镜头
