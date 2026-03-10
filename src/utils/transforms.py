@@ -1,30 +1,28 @@
+"""
+utils/transforms.py — Blender object transform helpers for mi2bl.
+
+Key design note:
+    Mine-Imator `default_values` = the position where the user *placed* the
+    object when creating it in MI (the "creation placement").  It is NOT a set
+    of property defaults.  We must NOT apply it as a Blender rest transform.
+
+    Keyframe animation values (POS/ROT/SCA in node.keyframes) are relative to
+    the MI hard-defaults (0 pos, 0 rot, 1 scale) — they already encode the full
+    animated trajectory.  When keyframes exist, the object's Blender location is
+    set by the animator; when there are no keyframes the object sits at origin.
+
+    `default_values` is stored as raw custom properties for reference via
+    `store_mi_placement()` in scene/props.py.
+"""
+
 import math
 from mathutils import Euler
 from ..constants import MI_SCALE
 
-def apply_default_transform(obj, node, disable_scale=False):
-    """Apply the default_values from MI as the object's rest transform."""
-    dv = node.default_values
 
-    # Position:  MI UI X → BL X,  MI UI Y (Up) → BL Z,  MI UI Z (Depth) → BL -Y
-    px = dv.get("POS_X", 0.0) * MI_SCALE
-    py = dv.get("POS_Y", 0.0) * MI_SCALE  # UI Y (Up) → BL Z
-    pz = dv.get("POS_Z", 0.0) * MI_SCALE  # UI Z (Depth) → BL -Y
-    obj.location = (px, -pz, py)
-
-    # Rotation
-    rx = math.radians(dv.get("ROT_X", 0.0))
-    ry = math.radians(dv.get("ROT_Y", 0.0))  # UI Y (Yaw) → BL Z
-    rz = math.radians(dv.get("ROT_Z", 0.0))  # UI Z (Roll) → BL -Y
+def clear_transform(obj):
+    """Set the Blender object transform to identity (origin, no rotation, unit scale)."""
+    obj.location = (0.0, 0.0, 0.0)
     obj.rotation_mode = 'XYZ'
-    # MI camera zero-rot (Yaw=0) faces south (-Y in BL); Blender camera zero-rot faces -Z.
-    obj.rotation_euler = Euler((rx, -rz, ry), 'XYZ')
-
-    # Scale
-    if not disable_scale:
-        sx = dv.get("SCA_X", 1.0)
-        sy = dv.get("SCA_Y", 1.0)  # UI Y → BL Z
-        sz = dv.get("SCA_Z", 1.0)  # UI Z → BL Y
-        obj.scale = (sx, sz, sy)
-    else:
-        obj.scale = (1.0, 1.0, 1.0)
+    obj.rotation_euler = Euler((0.0, 0.0, 0.0), 'XYZ')
+    obj.scale = (1.0, 1.0, 1.0)

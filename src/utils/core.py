@@ -84,13 +84,51 @@ def fix_mi_yz_swap(values):
             fixed[k] = v
     return fixed
 
+# --- MI Hard Defaults (authoritative, sourced from tl_value_default.gml) ---
+# Keys whose default is NOT 0 must be listed here.
+# MI never writes these into keyframes, so importers must supply them.
+_MI_HARD_DEFAULTS_CORE = {
+    # Transform
+    "POS_X": 0.0, "POS_Y": 0.0, "POS_Z": 0.0,
+    "ROT_X": 0.0, "ROT_Y": 0.0, "ROT_Z": 0.0,
+    "SCA_X": 1.0, "SCA_Y": 1.0, "SCA_Z": 1.0,
+    # Visibility & Opacity
+    "VISIBLE": True,
+    "ALPHA": 1.0,
+    # Material / PBR
+    "RGB_ADD": 0,           # c_black
+    "RGB_MUL": 16777215,    # c_white
+    "EMISSIVE": 0.0,
+    "METALLIC": 0.0,
+    "ROUGHNESS": 1.0,
+    "SUBSURFACE": 0.0,
+    "SUBSURFACE_RADIUS_RED": 1.0,
+    "SUBSURFACE_RADIUS_GREEN": 1.0,
+    "SUBSURFACE_RADIUS_BLUE": 1.0,
+    "SUBSURFACE_COLOR": 16777215,   # c_white
+    # Glow
+    "GLOW_COLOR": 16777215,         # c_white
+    # Bend
+    "BEND_ANGLE_X": 0.0,
+    "BEND_ANGLE_Y": 0.0,
+    "BEND_ANGLE_Z": 0.0,
+    # Easing / Transition
+    "TRANSITION": "linear",
+    "EASE_IN_X": 1.0,
+    "EASE_IN_Y": 0.0,
+    "EASE_OUT_X": 0.0,
+    "EASE_OUT_Y": 1.0,
+}
+
+
 def fill_defaults(values):
-    """Fill in missing transform keys with MI defaults."""
-    for k in ("POS_X", "POS_Y", "POS_Z", "ROT_X", "ROT_Y", "ROT_Z"):
-        values.setdefault(k, 0.0)
-    for k in ("SCA_X", "SCA_Y", "SCA_Z"):
-        values.setdefault(k, 1.0)
-    values.setdefault("TRANSITION", "linear")
+    """Fill in missing keyframe keys with MI hard defaults.
+
+    This is used by the miframes import path (core.py / parse_mi_file_data)
+    and must match the MI engine's tl_value_default() switch table.
+    """
+    for k, v in _MI_HARD_DEFAULTS_CORE.items():
+        values.setdefault(k, v)
     return values
 
 def parse_mi_file_data(data, char_index=0):

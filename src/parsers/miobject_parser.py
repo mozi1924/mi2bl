@@ -9,13 +9,62 @@ Supported timeline types for scene import:
   - "folder"  →  Blender Empty
   - "cube"    →  Blender MI-style Cube mesh
   - "surface" →  Blender MI-style Surface (upright plane) mesh
+  - "block"   →  Blender MI-style Block mesh
+  - "camera"  →  Blender Camera setup
+  - "pointlight" / "spotlight" → Blender Light setup
+  - "char" / "bodypart" / "scenery" / "item" / "particle_spawner" / "text" → Empty placeholders
 
-The parser intentionally ignores types that are not yet supported
-(e.g. "char", "camera", "audio", "bodypart", etc.).
+The parser intentionally reads ALL supported types and resolves default values
+so that MI's "only write non-default values to keyframes" design is correctly
+handled by inserting complete keyframe data at import time.
 """
 
 import json
 import math
+
+# ---- MI Hard Defaults Table (from tl_value_default.gml) --------------------
+# These are the MI engine's fallback values when a key is absent from a keyframe.
+# MI NEVER writes these into keyframes — importers MUST supply them.
+# Colors are stored as int (c_white = 16777215, c_black = 0).
+
+MI_HARD_DEFAULTS = {
+    # Transform
+    "POS_X": 0.0, "POS_Y": 0.0, "POS_Z": 0.0,
+    "ROT_X": 0.0, "ROT_Y": 0.0, "ROT_Z": 0.0,
+    "SCA_X": 1.0, "SCA_Y": 1.0, "SCA_Z": 1.0,
+
+    # Visibility & Opacity
+    "VISIBLE": True,
+    "ALPHA": 1.0,
+
+    # Material / PBR tracks
+    "RGB_ADD": 0,           # MI stores as int color (c_black = 0)
+    "RGB_MUL": 16777215,    # c_white
+    "EMISSIVE": 0.0,        # labelled "GLOW" in older docs (brightness of emission)
+    "METALLIC": 0.0,
+    "ROUGHNESS": 1.0,
+    "SUBSURFACE": 0.0,
+    "SUBSURFACE_RADIUS_RED": 1.0,
+    "SUBSURFACE_RADIUS_GREEN": 1.0,
+    "SUBSURFACE_RADIUS_BLUE": 1.0,
+    "SUBSURFACE_COLOR": 16777215,   # c_white
+
+    # Glow / Bloom
+    "GLOW_COLOR": 16777215,     # c_white
+    # "GLOW" is a boolean toggle stored at TL level, not a keyframe value
+
+    # Transition / Easing (meta keys present in every keyframe)
+    "TRANSITION": "linear",
+    "EASE_IN_X": 1.0,
+    "EASE_IN_Y": 0.0,
+    "EASE_OUT_X": 0.0,
+    "EASE_OUT_Y": 1.0,
+
+    # Bend (body-part specific, default 0)
+    "BEND_ANGLE_X": 0.0,
+    "BEND_ANGLE_Y": 0.0,
+    "BEND_ANGLE_Z": 0.0,
+}
 
 # ---- MI Bug Fix (Y/Z swap) ------------------------------------------------
 
@@ -23,6 +72,9 @@ def fix_mi_yz_swap(values):
     """
     Mine-Imator has a known bug where UI Y (Up) and UI Z (Depth)
     are swapped in the saved JSON.  This restores the true UI values.
+
+    Only applies to keys ending in _Y or _Z that are NOT easing params.
+    Color keys (e.g. RGB_MUL, GLOW_COLOR) and boolean keys are unaffected.
     """
     fixed = {}
     for k, v in values.items():
@@ -36,18 +88,26 @@ def fix_mi_yz_swap(values):
 
 
 def _fill_defaults(values):
-    """Fill missing POS/ROT/SCA keys with MI defaults (POS=0, ROT=0, SCA=1)."""
-    for k in ("POS_X", "POS_Y", "POS_Z", "ROT_X", "ROT_Y", "ROT_Z"):
-        values.setdefault(k, 0.0)
-    for k in ("SCA_X", "SCA_Y", "SCA_Z"):
-        values.setdefault(k, 1.0)
-    values.setdefault("TRANSITION", "linear")
+    """
+    Fill missing keys with MI hard-defaults.
+
+    This implements the MI engine rule: "if a key is absent from a keyframe,
+    use the default value."  We apply these AFTER fix_mi_yz_swap so that
+    the defaults we insert are already in the correct (post-swap) coordinate
+    system and are never double-swapped.
+    """
+    for k, v in MI_HARD_DEFAULTS.items():
+        values.setdefault(k, v)
     return values
 
 
 # ---- Data Classes ----------------------------------------------------------
 
-SUPPORTED_TYPES = {"folder", "cube", "surface", "block", "char", "camera", "audio", "bodypart", "text", "scenery", "item", "particle_spawner", "spotlight", "pointlight"}
+SUPPORTED_TYPES = {
+    "folder", "cube", "surface", "block",
+    "char", "camera", "audio", "bodypart", "text",
+    "scenery", "item", "particle_spawner", "spotlight", "pointlight",
+}
 
 
 class MINode:
@@ -60,7 +120,13 @@ class MINode:
         "inherit",
         "children",
         "rot_point",
-        "template_data"
+        "template_data",
+        # Top-level static appearance flags (not in keyframes / default_values)
+        "backfaces", "shadows", "ssao",
+        "glow", "glow_texture", "only_render_glow",
+        "glint_mode",
+        "fog", "wind",
+        "blend_mode", "alpha_mode",
     )
 
     def __init__(self, tl_dict, templates_dict=None):
@@ -75,29 +141,57 @@ class MINode:
         self.parent_id = tl_dict.get("parent", "root")
         self.parent_tree_index = tl_dict.get("parent_tree_index", 0)
 
-        # default_values = scene placement offset (initial position)
+        # ── default_values: raw scene placement (creation position) ──────────
+        # IMPORTANT: This is NOT a "default value template".  It is the position
+        # where the user placed the object when they created it in MI.  It must
+        # NOT be used to seed keyframe data.  We store the raw (post-swap) dict
+        # so builder.py can write it as reference custom props.
         raw_dv = dict(tl_dict.get("default_values", {}))
         self.default_values = fix_mi_yz_swap(raw_dv)
 
-        # keyframes = {frame_str: {prop: value, ...}}
+        # ── keyframes ────────────────────────────────────────────────────────
+        # MI only writes non-default values into keyframes.
+        #
+        # `default_values` = object creation placement — IGNORED for keyframes.
+        #
+        # Keyframe merge priority (lowest → highest):
+        #   1. MI_HARD_DEFAULTS  — the engine's hard-coded fallback values
+        #   2. per-keyframe values from the JSON  — what the animator authored
+        #
+        # Processing:
+        #   a. fix_mi_yz_swap on raw per-frame dict (correct MI Y/Z swap bug)
+        #   b. Overlay per-frame values on top of MI_HARD_DEFAULTS baseline
         raw_kf = tl_dict.get("keyframes", {})
         self.keyframes = {}
         for frame_str, vals in raw_kf.items():
-            # 必须先 fix_mi_yz_swap，再 _fill_defaults！
-            # 原因：_fill_defaults 补入的 POS_Y/POS_Z 等默认值本身就是"正确的"值（即已经是
-            # 正确的 UI 坐标系），若先 fill 再 swap，这些 fill 进去的默认值会被再次反转，
-            # 导致 POS_Y=0 → POS_Z=0 产生双重错误。
+            # Step a: correct the MI Y/Z coordinate swap bug
             swapped = fix_mi_yz_swap(dict(vals))
-            fixed = _fill_defaults(swapped)
-            self.keyframes[int(frame_str)] = fixed
+            # Step b: hard defaults as baseline, per-frame values override
+            merged = dict(MI_HARD_DEFAULTS)  # lowest priority: engine fallbacks
+            merged.update(swapped)           # highest priority: authored per-frame
+            self.keyframes[int(frame_str)] = merged
 
-        # inherit flags (position, rotation, scale, etc.)
+        # ── inherit flags ────────────────────────────────────────────────────
         self.inherit = tl_dict.get("inherit", {})
 
-        # rot_point: offset from geometric center in MI local space.
+        # ── rot_point ────────────────────────────────────────────────────────
         # MI always saves this array regardless of rot_point_custom.
         # Default [0, -8, 0] = bottom-center of a 16-unit shape.
         self.rot_point = list(tl_dict.get("rot_point", [0.0, -8.0, 0.0]))
+
+        # ── Top-level static appearance properties ───────────────────────────
+        # These are NOT in keyframes — they are fixed per-object settings.
+        self.backfaces = tl_dict.get("backfaces", False)
+        self.shadows = tl_dict.get("shadows", True)
+        self.ssao = tl_dict.get("ssao", True)
+        self.glow = tl_dict.get("glow", False)
+        self.glow_texture = tl_dict.get("glow_texture", False)
+        self.only_render_glow = tl_dict.get("only_render_glow", False)
+        self.glint_mode = tl_dict.get("glint_mode", 0)
+        self.fog = tl_dict.get("fog", True)
+        self.wind = tl_dict.get("wind", False)
+        self.blend_mode = tl_dict.get("blend_mode", "normal")
+        self.alpha_mode = tl_dict.get("alpha_mode", 0)
 
         # Filled in during tree building
         self.children = []

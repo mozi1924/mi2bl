@@ -1,138 +1,180 @@
+"""
+scene/cameras.py — MI Camera native-property mapping and keyframing.
+
+The camera-specific MI properties that CAN be mapped directly to native
+Blender camera/DOF properties are handled here (FOV, DOF depth/blur, etc.).
+
+Camera-specific properties that have no direct Blender equivalent are stored
+as keyframe-able custom properties via props.apply_node_custom_props(), which
+is called by builder.py after this function returns.
+
+Static top-level flags (shake, etc.) are applied from node attributes set
+in the parser.
+
+This module no longer owns the _MI_CAMERA_SCALAR_PROPS / _MI_CAMERA_COLOR_PROPS
+dicts — those now live in props.py which is the single source of truth.
+"""
+
 import bpy
 import math
 from ..constants import MI_SCALE
-from .props import apply_node_custom_props
+from .props import apply_node_custom_props, apply_node_static_props
 
-_MI_CAMERA_SCALAR_PROPS = {
-    "CAM_BLOOM": 0.0, "CAM_VIGNETTE": 0.0, "CAM_CA": 0.0,
-    "CAM_DOF_RANGE": 200.0, "CAM_DOF_FADE_SIZE": 100.0, "CAM_DOF_BIAS": 0.0,
-    "CAM_DOF_THRESHOLD": 0.0, "CAM_DOF_GAIN": 0.0,
-    "CAM_DOF_FRINGE_RED": 1.0, "CAM_DOF_FRINGE_GREEN": 1.0, "CAM_DOF_FRINGE_BLUE": 1.0,
-    "CAM_DOF_FRINGE_ANGLE_RED": 90.0, "CAM_DOF_FRINGE_ANGLE_GREEN": -135.0, "CAM_DOF_FRINGE_ANGLE_BLUE": -45.0,
-    "CAM_BLOOM_THRESHOLD": 0.85, "CAM_BLOOM_INTENSITY": 0.4, "CAM_BLOOM_RADIUS": 1.0, "CAM_BLOOM_RATIO": 0.0,
-    "CAM_LENS_DIRT_BLOOM": 1.0, "CAM_LENS_DIRT_GLOW": 1.0, "CAM_LENS_DIRT_RADIUS": 0.5,
-    "CAM_LENS_DIRT_INTENSITY": 0.8, "CAM_LENS_DIRT_POWER": 1.5,
-    "CAM_COLOR_CORRECTION": 0.0, "CAM_CONTRAST": 0.0, "CAM_BRIGHTNESS": 0.0, "CAM_SATURATION": 1.0, "CAM_VIBRANCE": 0.0,
-    "CAM_GRAIN_STRENGTH": 0.10, "CAM_GRAIN_SATURATION": 0.10, "CAM_GRAIN_SIZE": 1.0,
-    "CAM_VIGNETTE_RADIUS": 1.0, "CAM_VIGNETTE_SOFTNESS": 0.5, "CAM_VIGNETTE_STRENGTH": 1.0,
-    "CAM_CA_BLUR_AMOUNT": 0.05, "CAM_CA_RED_OFFSET": 0.12, "CAM_CA_GREEN_OFFSET": 0.08, "CAM_CA_BLUE_OFFSET": 0.04,
-    "CAM_DISTORT_ZOOM_AMOUNT": 1.0, "CAM_DISTORT_AMOUNT": 0.05,
-    "CAM_SIZE_KEEP_ASPECT_RATIO": 1.0, "CAM_SHAKE_MODE": 1.0,
-}
-
-_MI_CAMERA_COLOR_PROPS = {
-    "CAM_BLOOM_BLEND": (1.0, 1.0, 1.0),
-    "CAM_VIGNETTE_COLOR": (0.0, 0.0, 0.0),
-    "CAM_COLOR_BURN": (1.0, 1.0, 1.0),
-}
-
-_MI_CAMERA_DESCRIPTIONS = {
-    "CAM_BLOOM": "MI: Bloom effect enabled",
-    "CAM_VIGNETTE": "MI: Vignette effect enabled",
-    "CAM_CA": "MI: Chromatic aberration effect enabled",
-    "CAM_DOF_RANGE": "MI: DoF in-focus range",
-    "CAM_DOF_FADE_SIZE": "MI: DoF fade size",
-    "CAM_DOF_BIAS": "MI: DoF bias",
-    "CAM_DOF_THRESHOLD": "MI: DoF threshold",
-    "CAM_DOF_GAIN": "MI: DoF gain",
-    "CAM_BLOOM_THRESHOLD": "MI: Bloom threshold",
-    "CAM_BLOOM_INTENSITY": "MI: Bloom intensity",
-    "CAM_BLOOM_RADIUS": "MI: Bloom radius",
-    "CAM_BLOOM_BLEND": "MI: Bloom blend color",
-    "CAM_COLOR_CORRECTION": "MI: Color correction enabled",
-    "CAM_CONTRAST": "MI: Contrast",
-    "CAM_BRIGHTNESS": "MI: Brightness",
-    "CAM_SATURATION": "MI: Saturation",
-    "CAM_VIBRANCE": "MI: Vibrance",
-    "CAM_VIGNETTE_RADIUS": "MI: Vignette radius",
-    "CAM_VIGNETTE_COLOR": "MI: Vignette color",
-}
-
-def get_camera_props():
-    return _MI_CAMERA_SCALAR_PROPS, _MI_CAMERA_COLOR_PROPS, _MI_CAMERA_DESCRIPTIONS
 
 def apply_camera_shake(pivot_obj, node):
-    """Apply camera shake as Noise modifiers on the pivot object's rotation F-curves."""
-    dv = node.default_values
-    if not dv.get("CAM_SHAKE", False): return
-        
-    sh_strengths = [dv.get(f"CAM_SHAKE_STRENGTH_{c}", 1.0) for c in "XZY"]
-    sh_speeds = [dv.get(f"CAM_SHAKE_SPEED_{c}", 1.0) for c in "XZY"]
+    """Apply camera shake as Noise modifiers on the pivot object's rotation F-curves.
+
+    Camera shake strength/speed come from keyframe data (already merged with
+    MI_HARD_DEFAULTS by the parser).  We use the first keyframe or frame 0.
+    `node.default_values` is the creation placement and is NOT used here.
+    """
+    # Get shake params from first keyframe (or hard defaults)
+    first_kf = node.keyframes.get(0, {}) if node.keyframes else {}
+    if not first_kf and node.keyframes:
+        first_kf = next(iter(node.keyframes.values()))
+    if not first_kf.get("CAM_SHAKE", False):
+        return
+
+    sh_strengths = [first_kf.get(f"CAM_SHAKE_STRENGTH_{c}", 1.0) for c in "XZY"]
+    sh_speeds    = [first_kf.get(f"CAM_SHAKE_SPEED_{c}",    1.0) for c in "XZY"]
 
     if not pivot_obj.animation_data or not pivot_obj.animation_data.action:
         pivot_obj.animation_data_create()
-        pivot_obj.animation_data.action = bpy.data.actions.new(name=pivot_obj.name + "_Shake")
+        pivot_obj.animation_data.action = bpy.data.actions.new(
+            name=pivot_obj.name + "_Shake"
+        )
 
     action = pivot_obj.animation_data.action
     for i in range(3):
         strength = sh_strengths[i]
-        if strength <= 0: continue
-        fcurve = action.fcurves.find("rotation_euler", index=i) or action.fcurves.new("rotation_euler", index=i)
-        if not fcurve.keyframe_points: fcurve.keyframe_points.insert(0, pivot_obj.rotation_euler[i])
+        if strength <= 0:
+            continue
+        fcurve = (
+            action.fcurves.find("rotation_euler", index=i)
+            or action.fcurves.new("rotation_euler", index=i)
+        )
+        if not fcurve.keyframe_points:
+            fcurve.keyframe_points.insert(0, pivot_obj.rotation_euler[i])
 
         mod = fcurve.modifiers.new('NOISE')
         mod.amplitude = math.radians(strength)
-        mod.scale = 5.0 / max(0.01, sh_speeds[i])
-        mod.phase = i * 100.0
+        mod.scale     = 5.0 / max(0.01, sh_speeds[i])
+        mod.phase     = i * 100.0
+
 
 def apply_camera_properties(cam_lens_obj, node, start_frame, fps_scale):
-    """Apply camera-specific lens properties and keyframes."""
+    """
+    Apply camera-specific native lens properties and keyframes.
+
+    Properties written to native Blender camera data:
+      - lens (angle)         ← CAM_FOV
+      - dof.use_dof          ← CAM_DOF (bool)
+      - dof.focus_distance   ← CAM_DOF_DEPTH / CAM_ROTATE_DISTANCE
+      - dof.aperture_fstop   ← CAM_DOF_BLUR_SIZE
+      - dof.aperture_blades  ← CAM_BLADE_AMOUNT
+      - dof.aperture_ratio   ← CAM_DOF_BLUR_RATIO
+      - dof.aperture_rotation← CAM_BLADE_ANGLE
+      - location[Z]          ← CAM_ROTATE_DISTANCE (lens offset along cam axis)
+
+    Everything else is handled by apply_node_custom_props (called by builder).
+    """
     cam_data = cam_lens_obj.data
-    dv = node.default_values
     cam_data.sensor_fit = 'VERTICAL'
 
-    frames = set(node.keyframes.keys()) if node.keyframes else {0}
+    # Camera hard defaults (from tl_value_default.gml)
+    _CAM_HARD_DEFAULTS = {
+        "CAM_FOV": 45.0,
+        "CAM_DOF": False,
+        "CAM_DOF_DEPTH": 0.0,
+        "CAM_ROTATE_DISTANCE": 100.0,
+        "CAM_DOF_BLUR_SIZE": 0.01,
+        "CAM_BLADE_AMOUNT": 0,
+        "CAM_DOF_BLUR_RATIO": 1.0,
+        "CAM_BLADE_ANGLE": 0.0,
+        "CAM_SIZE_USE_PROJECT": True,
+        "CAM_WIDTH": 1280,
+        "CAM_HEIGHT": 720,
+        "CAM_EXPOSURE": 1.0,
+        "CAM_GAMMA": 2.2,
+    }
+
+    # Always include frame 0; then every authored keyframe
+    frames = set(node.keyframes.keys()) if node.keyframes else set()
     frames.add(0)
 
     for frame_num in sorted(frames):
         time = start_frame + (frame_num * fps_scale)
-        cv = dict(dv)
-        if node.keyframes: cv.update(node.keyframes.get(frame_num, {}))
+        # node.keyframes contains MI_HARD_DEFAULTS + per-frame overrides (from parser).
+        # node.default_values = creation placement — NOT used here.
+        kf = node.keyframes.get(frame_num, {})
+        # Merge: cam hard defaults → per-frame keyframe values
+        cv = dict(_CAM_HARD_DEFAULTS)
+        cv.update(kf)
 
-        if "CAM_FOV" in cv or frame_num == 0:
-            cam_data.angle = math.radians(cv.get("CAM_FOV", 45.0))
-            cam_data.keyframe_insert("lens", frame=time)
+        # ── FOV ─────────────────────────────────────────────────────────────
+        fov = cv.get("CAM_FOV", 45.0)
+        cam_data.angle = math.radians(float(fov))
+        cam_data.keyframe_insert("lens", frame=time)
 
-        if "CAM_DOF" in cv or frame_num == 0:
-            cam_data.dof.use_dof = bool(cv.get("CAM_DOF", False))
-            cam_data.dof.keyframe_insert("use_dof", frame=time)
+        # ── DOF toggle ──────────────────────────────────────────────────────
+        cam_data.dof.use_dof = bool(cv.get("CAM_DOF", False))
+        cam_data.dof.keyframe_insert("use_dof", frame=time)
 
-        if any(k in cv for k in ["CAM_DOF_DEPTH", "CAM_ROTATE_DISTANCE"]) or frame_num == 0:
-            depth = cv.get("CAM_DOF_DEPTH", 0.0)
-            if depth <= 0: depth = cv.get("CAM_ROTATE_DISTANCE", 100.0)
-            cam_data.dof.focus_distance = depth * MI_SCALE
-            cam_data.dof.keyframe_insert("focus_distance", frame=time)
+        # ── Focus distance ───────────────────────────────────────────────────
+        depth = float(cv.get("CAM_DOF_DEPTH", 0.0))
+        if depth <= 0:
+            depth = float(cv.get("CAM_ROTATE_DISTANCE", 100.0))
+        cam_data.dof.focus_distance = depth * MI_SCALE
+        cam_data.dof.keyframe_insert("focus_distance", frame=time)
 
-        if "CAM_DOF_BLUR_SIZE" in cv or frame_num == 0:
-            blur = cv.get("CAM_DOF_BLUR_SIZE", 0.01)
-            fstop = 128.0 if blur <= 0 else 1.0 / (blur * 5.0)
-            cam_data.dof.aperture_fstop = max(0.1, min(128.0, fstop))
-            cam_data.dof.keyframe_insert("aperture_fstop", frame=time)
+        # ── Aperture f-stop (from blur size) ────────────────────────────────
+        blur = float(cv.get("CAM_DOF_BLUR_SIZE", 0.01))
+        fstop = 128.0 if blur <= 0 else 1.0 / (blur * 5.0)
+        cam_data.dof.aperture_fstop = max(0.1, min(128.0, fstop))
+        cam_data.dof.keyframe_insert("aperture_fstop", frame=time)
 
-        for prop, key in [("aperture_blades", "CAM_BLADE_AMOUNT"), ("aperture_ratio", "CAM_DOF_BLUR_RATIO")]:
-            if key in cv or frame_num == 0:
-                setattr(cam_data.dof, prop, cv.get(key, 0 if "AMOUNT" in key else 1.0))
-                cam_data.dof.keyframe_insert(prop, frame=time)
-        
-        if "CAM_BLADE_ANGLE" in cv or frame_num == 0:
-            cam_data.dof.aperture_rotation = math.radians(cv.get("CAM_BLADE_ANGLE", 0.0))
-            cam_data.dof.keyframe_insert("aperture_rotation", frame=time)
+        # ── Aperture blades ──────────────────────────────────────────────────
+        cam_data.dof.aperture_blades = int(cv.get("CAM_BLADE_AMOUNT", 0))
+        cam_data.dof.keyframe_insert("aperture_blades", frame=time)
 
-        if "CAM_ROTATE_DISTANCE" in cv or frame_num == 0:
-            cam_lens_obj.location[2] = cv.get("CAM_ROTATE_DISTANCE", 0.0) * MI_SCALE
-            cam_lens_obj.keyframe_insert("location", index=2, frame=time)
+        # ── Aperture ratio ───────────────────────────────────────────────────
+        cam_data.dof.aperture_ratio = float(cv.get("CAM_DOF_BLUR_RATIO", 1.0))
+        cam_data.dof.keyframe_insert("aperture_ratio", frame=time)
 
-    if cam_lens_obj.parent: apply_camera_shake(cam_lens_obj.parent, node)
+        # ── Aperture rotation ────────────────────────────────────────────────
+        cam_data.dof.aperture_rotation = math.radians(float(cv.get("CAM_BLADE_ANGLE", 0.0)))
+        cam_data.dof.keyframe_insert("aperture_rotation", frame=time)
 
-    # Scene settings (frame 0)
-    cv0 = dict(dv)
-    if node.keyframes: cv0.update(node.keyframes.get(0, {}))
+        # ── Lens Z offset (CAM_ROTATE_DISTANCE) ─────────────────────────────
+        cam_lens_obj.location[2] = float(cv.get("CAM_ROTATE_DISTANCE", 0.0)) * MI_SCALE
+        cam_lens_obj.keyframe_insert("location", index=2, frame=time)
+
+    # ── Camera shake (noise modifiers, not keyframes) ────────────────────────
+    if cam_lens_obj.parent:
+        apply_camera_shake(cam_lens_obj.parent, node)
+
+    # ── Scene-level settings (only frame 0) ─────────────────────────────────
+    # node.default_values = creation placement — NOT used here.
+    # Use frame 0 keyframe data (which contains MI_HARD_DEFAULTS + per-frame overrides).
+    cv0 = dict(_CAM_HARD_DEFAULTS)
+    if node.keyframes:
+        cv0.update(node.keyframes.get(0, {}))
+
     if not cv0.get("CAM_SIZE_USE_PROJECT", True):
-        bpy.context.scene.render.resolution_x = int(cv0.get("CAM_WIDTH", 1280))
+        bpy.context.scene.render.resolution_x = int(cv0.get("CAM_WIDTH",  1280))
         bpy.context.scene.render.resolution_y = int(cv0.get("CAM_HEIGHT", 720))
-    if "CAM_EXPOSURE" in cv0:
-        bpy.context.scene.view_settings.exposure = math.log2(max(0.01, cv0["CAM_EXPOSURE"]))
-    if "CAM_GAMMA" in cv0:
-        bpy.context.scene.view_settings.gamma = cv0["CAM_GAMMA"] / 2.2
 
+    if "CAM_EXPOSURE" in cv0:
+        bpy.context.scene.view_settings.exposure = math.log2(
+            max(0.01, float(cv0["CAM_EXPOSURE"]))
+        )
+    if "CAM_GAMMA" in cv0:
+        bpy.context.scene.view_settings.gamma = float(cv0["CAM_GAMMA"]) / 2.2
+
+    # ── MI custom props (post-processing, etc.) ──────────────────────────────
+    # Called here for the LENS object; builder.py does NOT call it again
+    # because camera is excluded from _pivot_custom_prop_types.
     apply_node_custom_props(cam_lens_obj, node, start_frame, fps_scale)
+
+    # ── Static appearance flags ──────────────────────────────────────────────
+    apply_node_static_props(cam_lens_obj, node)

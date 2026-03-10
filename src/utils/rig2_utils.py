@@ -67,7 +67,11 @@ def _find_all_char_anchors(filepath, supported_node_ids):
 def _char_parent_chain_has_scale(filepath, anchor_id):
     """
     Return True if anchor or any of its ancestors has explicit non-unit scale
-    (default_values or keyframes) in the source .miobject timeline.
+    in keyframes in the source .miobject timeline.
+
+    NOTE: `default_values` is the MI creation placement — it is NOT checked here
+    because mi2bl ignores creation placement when importing (objects are placed
+    at origin; keyframes define the full animated trajectory).
     """
     if not anchor_id:
         return False
@@ -85,10 +89,7 @@ def _char_parent_chain_has_scale(filepath, anchor_id):
         if not tl:
             break
 
-        dv = tl.get("default_values", {})
-        if any(float(dv.get(k, 1.0)) != 1.0 for k in ("SCA_X", "SCA_Y", "SCA_Z")):
-            return True
-
+        # Only check keyframes — default_values is creation placement, not property defaults
         for vals in tl.get("keyframes", {}).values():
             if any(k in vals and float(vals.get(k, 1.0)) != 1.0 for k in ("SCA_X", "SCA_Y", "SCA_Z")):
                 return True
