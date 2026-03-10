@@ -4,7 +4,7 @@ import os
 import math
 
 # --- Constants ---
-MI_SCALE = 1.0 / 16.0
+from ..constants import MI_SCALE
 
 # Mine-Imator to Blender easing interpolation mapping
 MI_TO_BLENDER_EASING_MAP = {

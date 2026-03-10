@@ -8,8 +8,8 @@ from mathutils import Euler, Vector
 from ..utils import core
 from ..utils.core import MIBaseImporter, apply_mi_transition
 
-# --- Constants ---
-MI_SCALE = 1.0 / 16.0
+from ..constants import MI_SCALE
+from ..scene.animator import apply_interpolation_to_obj
 
 
 class MI_OT_ImportObjectAction(bpy.types.Operator, MIBaseImporter):
