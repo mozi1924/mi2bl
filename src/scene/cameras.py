@@ -74,7 +74,7 @@ def apply_camera_properties(cam_lens_obj, node, start_frame, fps_scale):
       - dof.aperture_blades  ← CAM_BLADE_AMOUNT
       - dof.aperture_ratio   ← CAM_DOF_BLUR_RATIO
       - dof.aperture_rotation← CAM_BLADE_ANGLE
-      - location[Z]          ← CAM_ROTATE_DISTANCE (lens offset along cam axis)
+      - (CAM_ROTATE_DISTANCE stored as custom prop only, not applied as Z offset)
 
     Everything else is handled by apply_node_custom_props (called by builder).
     """
@@ -145,9 +145,12 @@ def apply_camera_properties(cam_lens_obj, node, start_frame, fps_scale):
         cam_data.dof.aperture_rotation = math.radians(float(cv.get("CAM_BLADE_ANGLE", 0.0)))
         cam_data.dof.keyframe_insert("aperture_rotation", frame=time)
 
-        # ── Lens Z offset (CAM_ROTATE_DISTANCE) ─────────────────────────────
-        cam_lens_obj.location[2] = float(cv.get("CAM_ROTATE_DISTANCE", 0.0)) * MI_SCALE
-        cam_lens_obj.keyframe_insert("location", index=2, frame=time)
+        # ── Lens Z offset: NOT applied.
+        # CAM_ROTATE_DISTANCE in MI controls a camera-orbit pivot offset, but
+        # Blender cameras approximate this differently. Applying this offset
+        # shifts the physical lens away from the pivot and causes a mismatch
+        # with the original MI framing. Store as custom prop only (via
+        # apply_node_custom_props, called at the end of this function).
 
     # ── Camera shake (noise modifiers, not keyframes) ────────────────────────
     if cam_lens_obj.parent:

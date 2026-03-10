@@ -5,7 +5,7 @@ from ..utils.rig2_utils import (
     _miobject_has_character, _find_all_char_anchors, _char_parent_chain_has_scale,
     _append_rig2_armatures, _pick_parent_anchor, _bind_childof_follow, _parent_keep_world, _import_with_rig2_miframes
 )
-from ..scene.builder import _build_tree
+from ..scene.builder import _build_tree, build_scene
 
 class MI_OT_ImportMiobjectScene(bpy.types.Operator):
     """Import a .miobject file as a scene hierarchy (folders, cubes, surfaces)"""
@@ -97,13 +97,17 @@ class MI_OT_ImportMiobjectScene(bpy.types.Operator):
             else:
                 collection = context.collection
 
-            imported_root_objects = []
-            imported_object_map = {}
-            # Build tree
-            for root_node in roots:
-                root_obj = _build_tree(root_node, None, collection,
-                                       self.start_frame, fps_scale, imported_object_map, None)
-                imported_root_objects.append(root_obj)
+            # Build scene tree (first pass: objects; second pass: Follow Path constraints)
+            imported_object_map = build_scene(
+                roots, all_nodes, collection,
+                start_frame=self.start_frame,
+                fps_scale=fps_scale,
+            )
+            imported_root_objects = [
+                imported_object_map[n.id]
+                for n in roots
+                if n.id in imported_object_map
+            ]
         else:
             imported_root_objects = []
             imported_object_map = {}

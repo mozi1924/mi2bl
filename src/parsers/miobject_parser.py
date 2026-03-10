@@ -13,6 +13,8 @@ Supported timeline types for scene import:
   - "camera"  →  Blender Camera setup
   - "pointlight" / "spotlight" → Blender Light setup
   - "char" / "bodypart" / "scenery" / "item" / "particle_spawner" / "text" → Empty placeholders
+  - "path"      →  Blender NURBS Curve (Order 3, matching MI quadratic B-spline)
+  - "pathpoint" →  Control points baked into the parent NURBS curve; no standalone object
 
 The parser intentionally reads ALL supported types and resolves default values
 so that MI's "only write non-default values to keyframes" design is correctly
@@ -107,6 +109,8 @@ SUPPORTED_TYPES = {
     "folder", "cube", "surface", "block",
     "char", "camera", "audio", "bodypart", "text",
     "scenery", "item", "particle_spawner", "spotlight", "pointlight",
+    # Path system
+    "path", "pathpoint",
 }
 
 
@@ -127,6 +131,8 @@ class MINode:
         "glint_mode",
         "fog", "wind",
         "blend_mode", "alpha_mode",
+        # Path-specific data (only set for type=="path")
+        "path_data",
     )
 
     def __init__(self, tl_dict, templates_dict=None):
@@ -192,6 +198,20 @@ class MINode:
         self.wind = tl_dict.get("wind", False)
         self.blend_mode = tl_dict.get("blend_mode", "normal")
         self.alpha_mode = tl_dict.get("alpha_mode", 0)
+
+        # ── Path-specific settings (only for type=="path") ───────────────────
+        # Raw "path" sub-object from JSON: smooth, closed, detail, etc.
+        raw_path = tl_dict.get("path", None)
+        if raw_path is not None:
+            self.path_data = {
+                "smooth":  raw_path.get("smooth",  True),
+                "closed":  raw_path.get("closed",  False),
+                "detail":  raw_path.get("detail",  6),
+                "shape_generate": raw_path.get("shape_generate", False),
+                "shape_radius":   raw_path.get("shape_radius",   8),
+            }
+        else:
+            self.path_data = None
 
         # Filled in during tree building
         self.children = []

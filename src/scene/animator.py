@@ -1,5 +1,6 @@
 """
 scene/animator.py — Apply MI keyframe animation data onto Blender objects.
+Also handles static transform from default_values for objects without keyframes.
 
 The parser (miobject_parser.MINode) merges all keyframe data with MI_HARD_DEFAULTS
 before storing them (per-frame values override the hard defaults).  Every keyframe
@@ -139,3 +140,56 @@ def apply_interpolation_to_obj(obj, kf_trans_list):
                 else:
                     apply_mi_transition(kf0, t_type, kf1)
             fcurve.update()
+
+
+def apply_default_values_transform(obj, node):
+    """
+    Apply `node.default_values` as a static (non-animated) Blender transform.
+
+    Called ONLY when a node has NO keyframes.  `default_values` is the position
+    the user placed the object at in MI when first creating it.  For objects that
+    are never animated, this is the only transform data available.
+
+    `default_values` has already been through `fix_mi_yz_swap` in the parser,
+    so the coordinate convention here matches `apply_keyframes`:
+        POS_X → BL X
+        POS_Z → BL -Y  (UI depth after swap)
+        POS_Y → BL Z   (UI up after swap)
+        ROT_X → BL X
+        ROT_Z → BL -Y
+        ROT_Y → BL Z
+        SCA_X → BL X
+        SCA_Z → BL Y   (UI depth after swap)
+        SCA_Y → BL Z   (UI up after swap)
+
+    Parameters
+    ----------
+    obj  : bpy.types.Object
+    node : MINode  (node.default_values is post-yz-swap)
+    """
+    dv = getattr(node, "default_values", {})
+    if not dv:
+        return
+
+    # ── Location ──────────────────────────────────────────────────────────────
+    px = dv.get("POS_X", 0.0)
+    py = dv.get("POS_Y", 0.0)   # UI up (post-swap)
+    pz = dv.get("POS_Z", 0.0)   # UI depth (post-swap)
+    obj.location = (
+        px * MI_SCALE,
+        -pz * MI_SCALE,   # UI depth → BL -Y
+        py * MI_SCALE,    # UI up → BL Z
+    )
+
+    # ── Rotation ──────────────────────────────────────────────────────────────
+    obj.rotation_mode = 'XYZ'
+    rx = _math_radians(dv.get("ROT_X", 0.0))
+    ry = _math_radians(-dv.get("ROT_Z", 0.0))  # UI Z → BL -Y
+    rz = _math_radians(dv.get("ROT_Y", 0.0))   # UI Y → BL Z
+    obj.rotation_euler = (rx, ry, rz)
+
+    # ── Scale ─────────────────────────────────────────────────────────────────
+    sx = dv.get("SCA_X", 1.0)
+    sy = dv.get("SCA_Z", 1.0)   # UI depth → BL Y
+    sz = dv.get("SCA_Y", 1.0)   # UI up → BL Z
+    obj.scale = (sx, sy, sz)

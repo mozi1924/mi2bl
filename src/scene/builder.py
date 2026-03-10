@@ -11,16 +11,26 @@ Responsibilities:
   5. Apply keyframe-able custom props for ALL MI value tracks (via props module).
   6. Apply static appearance flags as non-animated custom props.
   7. Handle special child-object setup for cameras and lights.
+  8. Handle Path objects (NURBS curve) and Follow Path constraints.
+
+Path system:
+  - MI "path" node  → Blender NURBS curve (Order 3, matching MI quadratic B-spline).
+  - MI "pathpoint" nodes are the curve's control points (children of "path").
+    They are not created as Blender objects; their positions are baked into the
+    NURBS spline at frame 0.
+  - Any MI object whose keyframes contain PATH_OBJ + PATH_OFFSET receives a
+    Blender FOLLOW_PATH constraint targeting the corresponding curve object.
 """
 
 import bpy
 import math
 from ..scene import mesh_gen
 from ..utils.transforms import clear_transform
-from ..scene.animator import apply_keyframes, apply_interpolation_to_obj
+from ..scene.animator import apply_keyframes, apply_interpolation_to_obj, apply_default_values_transform
 from ..scene.props import apply_node_custom_props, apply_node_static_props, store_mi_placement
 from ..scene.lights import apply_light_properties
 from ..scene.cameras import apply_camera_properties
+from ..scene.paths import create_path_curve, apply_follow_path_constraint
 
 
 def _create_blender_object(node, collection):
@@ -161,6 +171,23 @@ def _create_blender_object(node, collection):
         obj = bpy.data.objects.new(display_name, text_data)
         collection.objects.link(obj)
 
+    elif node.type == "path":
+        # Placeholder — actual NURBS curve is built later in _build_tree
+        # after pathpoint children are collected.  Return a temporary empty
+        # that will be replaced by the curve object.
+        obj = bpy.data.objects.new(display_name + "_PathPlaceholder", None)
+        obj.empty_display_type = 'PLAIN_AXES'
+        collection.objects.link(obj)
+
+    elif node.type == "pathpoint":
+        # Pathpoints are baked into the parent path curve; they don't get their
+        # own Blender objects.  We create a minimal empty as a placeholder so
+        # the tree walk remains consistent.
+        obj = bpy.data.objects.new(display_name + "_PP", None)
+        obj.empty_display_type = 'SINGLE_ARROW'
+        obj.empty_display_size = 0.1
+        collection.objects.link(obj)
+
     elif node.type in ("char", "scenery", "item", "bodypart", "particle_spawner"):
         # Placeholder empties — Rig2 / future modules handle these
         obj = bpy.data.objects.new(display_name, None)
@@ -176,10 +203,57 @@ def _create_blender_object(node, collection):
     return obj
 
 
+def _extract_follow_path_data(node):
+    """
+    Scan a node's keyframes for PATH_OBJ / PATH_OFFSET keys.
+
+    Returns
+    -------
+    path_obj_id : str | None   — MI id of the target path node (or None)
+    offsets     : list[(frame_num, float)]  — list of (MI frame, offset 0..100)
+    """
+    path_obj_id = None
+    offsets = []
+
+    for frame_num, vals in sorted(node.keyframes.items()):
+        po = vals.get("PATH_OBJ")
+        if po and po not in ("", "null", None):
+            # The first non-null PATH_OBJ encountered is the target
+            if path_obj_id is None:
+                path_obj_id = po
+        poff = vals.get("PATH_OFFSET")
+        if poff is not None:
+            offsets.append((frame_num, float(poff)))
+
+    return path_obj_id, offsets
+
+
 def _build_tree(node, parent_obj, collection, start_frame, fps_scale,
                 object_map=None, disable_scale_node_ids=None):
     """Recursively create Blender objects from an MINode tree."""
 
+    # ── Path nodes: build the NURBS curve from pathpoint children ────────────
+    if node.type == "path":
+        return _build_path_node(
+            node, parent_obj, collection, start_frame, fps_scale,
+            object_map, disable_scale_node_ids,
+        )
+
+    # ── Pathpoints are handled inside _build_path_node; skip standalone ───────
+    # (In a well-formed MI file a pathpoint always has a "path" parent.)
+    if node.type == "pathpoint":
+        # Create a minimal placeholder so the tree is consistent, but don't
+        # recurse further (pathpoints have no meaningful children).
+        obj = _create_blender_object(node, collection)
+        if object_map is not None:
+            object_map[node.id] = obj
+        if parent_obj is not None:
+            obj.parent = parent_obj
+        clear_transform(obj)
+        obj["mi_type"] = "pathpoint"
+        return obj
+
+    # ── Standard objects ──────────────────────────────────────────────────────
     obj = _create_blender_object(node, collection)
     if object_map is not None:
         object_map[node.id] = obj
@@ -188,17 +262,26 @@ def _build_tree(node, parent_obj, collection, start_frame, fps_scale,
     if parent_obj is not None:
         obj.parent = parent_obj
 
-    # ── Identity transform ───────────────────────────────────────────────────
-    # MI `default_values` = object creation placement — NOT a property default.
-    # We do NOT apply it as a Blender rest transform.  Instead we zero the
-    # transform and store `default_values` as reference custom props.
-    clear_transform(obj)
+    # ── Transform ────────────────────────────────────────────────────────────
+    # Strategy:
+    #   - Has keyframes → apply_keyframes writes the full animated trajectory
+    #                     (keyframes are absolute values in world/parent space).
+    #                     clear_transform first so we start from identity.
+    #   - No keyframes  → apply default_values as the static rest transform.
+    #                     (default_values is the position the user placed the
+    #                      object in MI; for un-animated objects this IS the
+    #                      intended position.)
+    # store_mi_placement stores default_values as reference custom props in
+    # either case.
     store_mi_placement(obj, node)
 
-    # ── Transform keyframes ───────────────────────────────────────────────────
     kf_trans = []
     if node.keyframes:
+        clear_transform(obj)
         kf_trans = apply_keyframes(obj, node, start_frame, fps_scale)
+    else:
+        # No keyframes — use default_values as static transform
+        apply_default_values_transform(obj, node)
         apply_interpolation_to_obj(obj, kf_trans)
 
     # ── MI value-track custom props (pivot object) ────────────────────────────
@@ -247,3 +330,149 @@ def _build_tree(node, parent_obj, collection, start_frame, fps_scale,
             )
 
     return obj
+
+
+def _build_path_node(node, parent_obj, collection, start_frame, fps_scale,
+                     object_map, disable_scale_node_ids):
+    """
+    Build a Blender NURBS curve from an MI "path" node and its pathpoint children.
+
+    Steps:
+      1. Separate pathpoint children from non-pathpoint children.
+      2. Create a NURBS curve from the pathpoints.
+      3. Apply common transform keyframes to the curve object.
+      4. Recurse for non-pathpoint children.
+    """
+    display_name = node.display_name
+
+    # ── Separate children ─────────────────────────────────────────────────────
+    pathpoint_children = [c for c in node.children if c.type == "pathpoint"]
+    other_children     = [c for c in node.children if c.type != "pathpoint"]
+
+    # Sort pathpoints by their tree index (already sorted by parser, but be safe)
+    pathpoint_children.sort(key=lambda n: n.parent_tree_index)
+
+    # ── Create the NURBS curve ────────────────────────────────────────────────
+    curve_obj = create_path_curve(
+        path_node=node,
+        pathpoint_nodes=pathpoint_children,
+        name=display_name,
+        collection=collection,
+    )
+
+    if object_map is not None:
+        object_map[node.id] = curve_obj
+
+    # Register pathpoint nodes in object_map with the curve obj as proxy
+    # (they have no real Blender objects; use curve_obj as stand-in so
+    # PATH_OBJ references can resolve to the curve).
+    for pp in pathpoint_children:
+        if object_map is not None:
+            object_map[pp.id] = curve_obj
+
+    # ── Parent ────────────────────────────────────────────────────────────────
+    if parent_obj is not None:
+        curve_obj.parent = parent_obj
+
+    # ── Transform ────────────────────────────────────────────────────────────
+    store_mi_placement(curve_obj, node)
+
+    kf_trans = []
+    if node.keyframes:
+        clear_transform(curve_obj)
+        kf_trans = apply_keyframes(curve_obj, node, start_frame, fps_scale)
+        apply_interpolation_to_obj(curve_obj, kf_trans)
+    else:
+        apply_default_values_transform(curve_obj, node)
+
+    apply_node_static_props(curve_obj, node)
+    curve_obj["mi_type"] = "path"
+
+    # ── Recurse non-pathpoint children ────────────────────────────────────────
+    for child_node in other_children:
+        _build_tree(
+            child_node, curve_obj, collection, start_frame, fps_scale,
+            object_map, disable_scale_node_ids,
+        )
+
+    return curve_obj
+
+
+def _apply_follow_path_constraints(all_nodes, object_map, start_frame, fps_scale):
+    """
+    Second pass: for every non-pathpoint MI node whose keyframes contain
+    PATH_OBJ + PATH_OFFSET, add a Follow Path constraint to the corresponding
+    Blender object pointing at the curve object.
+
+    Must be called AFTER the full tree has been built so that object_map is
+    complete.
+    """
+    for node_id, node in all_nodes.items():
+        # Skip path/pathpoint nodes themselves
+        if node.type in ("path", "pathpoint"):
+            continue
+
+        path_obj_id, offsets = _extract_follow_path_data(node)
+        if not path_obj_id or not offsets:
+            continue
+
+        # Look up the Blender objects
+        obj       = object_map.get(node_id)
+        curve_obj = object_map.get(path_obj_id)
+
+        if obj is None or curve_obj is None:
+            continue
+
+        # Only apply if the target really is a curve (path nodes produce curves)
+        if curve_obj.type != 'CURVE':
+            continue
+
+        # Store raw MI path reference for diagnostics
+        obj["mi_path_target_id"] = path_obj_id
+        try:
+            obj.id_properties_ui("mi_path_target_id").update(
+                description="MI: ID of the followed path timeline"
+            )
+        except Exception:
+            pass
+
+        apply_follow_path_constraint(
+            obj=obj,
+            curve_obj=curve_obj,
+            path_offsets=offsets,
+            start_frame=start_frame,
+            fps_scale=fps_scale,
+        )
+
+
+def build_scene(roots, all_nodes, collection, start_frame=1, fps_scale=1.0,
+                disable_scale_node_ids=None):
+    """
+    Top-level entry point: build the entire scene from an MINode tree.
+
+    Parameters
+    ----------
+    roots                  : list[MINode]   — top-level nodes
+    all_nodes              : dict[str, MINode]  — id → MINode flat lookup
+    collection             : bpy.types.Collection
+    start_frame            : int
+    fps_scale              : float
+    disable_scale_node_ids : set[str] | None
+
+    Returns
+    -------
+    object_map : dict[str, bpy.types.Object]  — MI id → Blender object
+    """
+    object_map = {}
+
+    # ── First pass: build the object tree ────────────────────────────────────
+    for root_node in roots:
+        _build_tree(
+            root_node, None, collection, start_frame, fps_scale,
+            object_map, disable_scale_node_ids,
+        )
+
+    # ── Second pass: Follow Path constraints ──────────────────────────────────
+    _apply_follow_path_constraints(all_nodes, object_map, start_frame, fps_scale)
+
+    return object_map
