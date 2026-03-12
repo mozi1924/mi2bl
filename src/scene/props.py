@@ -391,13 +391,16 @@ def apply_mi_custom_props(
       - float → float custom property (slider)
       - color → float[3] with subtype='COLOR' (colour picker)
 
-    IMPORTANT: `node.default_values` is the MI creation placement — it is NOT
-    used here.  The baseline values come from the *_defs arguments (hard defaults).
+    IMPORTANT: node.keyframes already contains FULLY MERGED values from the three-
+    layer MI default system (MI_HARD_DEFAULTS ← default_values ← per-frame delta),
+    so every frame is guaranteed to have a complete value for every tracked key.
+    The *_defs arguments here provide fallback defaults ONLY for keys absent from
+    ALL keyframes (e.g. newly added props not yet written by MI).
 
     Parameters
     ----------
     obj         : bpy.types.Object
-    node        : MINode  (keyframes pre-merged with MI_HARD_DEFAULTS)
+    node        : MINode  (keyframes pre-merged with three-layer defaults)
     start_frame : int
     fps_scale   : float
     bool_defs   : {MI_KEY: bool}
@@ -424,8 +427,11 @@ def apply_mi_custom_props(
     props_initialised = False
     for frame_num in sorted(frames):
         time = start_frame + (frame_num * fps_scale)
-        # node.keyframes[frame_num] contains MI_HARD_DEFAULTS + per-frame overrides.
-        # For the injected frame 0 (no authored keyframe), use {}.
+        # node.keyframes[frame_num] is pre-merged (three layers):
+        #   MI_HARD_DEFAULTS ← default_values ← per-frame delta.
+        # An empty authored keyframe {} becomes the default_values position.
+        # For the injected frame 0 (no authored keyframe at all), fall back to
+        # {} so that the *_defs defaults below supply the correct values.
         kf_values = node.keyframes.get(frame_num, {})
 
         # ── Boolean props ────────────────────────────────────────────────────

@@ -2,18 +2,27 @@
 scene/animator.py — Apply MI keyframe animation data onto Blender objects.
 Also handles static transform from default_values for objects without keyframes.
 
-The parser (miobject_parser.MINode) merges all keyframe data with MI_HARD_DEFAULTS
-before storing them (per-frame values override the hard defaults).  Every keyframe
-in node.keyframes is guaranteed to contain ALL keys.
+MI Three-Layer Default Value System
+------------------------------------
+The parser (miobject_parser.MINode) builds each keyframe by merging three layers:
+  1. MI_HARD_DEFAULTS   — engine hard-coded fallbacks (POS=0, SCA=1, ROT=0, …)
+  2. default_values     — where the user placed/posed the object at creation time
+  3. per-frame delta    — only the values that differ from default_values
 
-Key design point:
-    `node.default_values` = MI object creation placement — it is IGNORED by the
-    animator.  Objects start at Blender origin; keyframes define the full trajectory.
+Result: every keyframe in node.keyframes is guaranteed to contain ALL keys
+with the correct absolute values ready for Blender.  An empty keyframe dict
+in the source file ({}) means "use default_values for that frame".
 
 Transform tracks (location / rotation / scale) are written directly to Blender.
 Material / appearance tracks are written as keyframe-able custom properties
 via the props module.  The animator handles the *transform* channels here
 and delegates everything else to apply_node_custom_props (called by builder).
+
+Note on `apply_default_values_transform`:
+  For objects with NO keyframes, default_values IS the complete transform (layer 2
+  already includes any non-zero creation placement).  It is applied directly as
+  a static Blender transform — it does NOT need to be merged with MI_HARD_DEFAULTS
+  again because it was already stored post-yz-swap by the parser.
 """
 
 import math
@@ -147,8 +156,10 @@ def apply_default_values_transform(obj, node):
     Apply `node.default_values` as a static (non-animated) Blender transform.
 
     Called ONLY when a node has NO keyframes.  `default_values` is the position
-    the user placed the object at in MI when first creating it.  For objects that
-    are never animated, this is the only transform data available.
+    the user placed the object at in MI when first creating it, stored as layer 2
+    of the three-layer default value system.  For objects that are never animated,
+    this is the complete and only transform data available.  It already contains
+    any non-zero placement (unlike MI_HARD_DEFAULTS which is all zeros).
 
     `default_values` has already been through `fix_mi_yz_swap` in the parser,
     so the coordinate convention here matches `apply_keyframes`:

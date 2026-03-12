@@ -16,9 +16,26 @@ Supported timeline types for scene import:
   - "path"      →  Blender NURBS Curve (Order 3, matching MI quadratic B-spline)
   - "pathpoint" →  Control points baked into the parent NURBS curve; no standalone object
 
-The parser intentionally reads ALL supported types and resolves default values
-so that MI's "only write non-default values to keyframes" design is correctly
-handled by inserting complete keyframe data at import time.
+MI Default Value System — Three-Layer Design
+--------------------------------------------
+Mine-Imator uses a "double delta" approach to minimise file size.  Values are
+only written to disk when they differ from the layer below:
+
+  Layer 1 (lowest):  MI_HARD_DEFAULTS  — engine hard-coded fallbacks
+                     (defined in tl_value_default.gml; e.g. POS=0, SCA=1)
+  Layer 2 (middle):  timeline `default_values`  — where the user placed/posed
+                     the object when creating it; saved relative to layer 1.
+  Layer 3 (highest): per-keyframe data  — only the deltas from layer 2 are
+                     written; missing keys mean "same as default_values".
+
+Concrete example (Grass Block.miobject):
+  default_values = {POS_X: 26.14924, POS_Y: 0.93506, POS_Z: 0.04474}
+  keyframes[0]   = {}   ← empty! means frame 0 == default_values exactly
+  keyframes[10]  = {POS_X: -67.50688, ...}  ← explicit delta from default
+
+The parser therefore merges each keyframe as:
+  MI_HARD_DEFAULTS  ←  default_values  ←  per-frame values
+                    (lowest priority → highest priority)
 """
 
 import json
@@ -89,18 +106,24 @@ def fix_mi_yz_swap(values):
     return fixed
 
 
-def _fill_defaults(values):
+def _build_keyframe_baseline(default_values_raw):
     """
-    Fill missing keys with MI hard-defaults.
+    Build the per-timeline effective baseline used as the fallback for every
+    keyframe in that timeline.
 
-    This implements the MI engine rule: "if a key is absent from a keyframe,
-    use the default value."  We apply these AFTER fix_mi_yz_swap so that
-    the defaults we insert are already in the correct (post-swap) coordinate
-    system and are never double-swapped.
+    Merge order (lowest → highest priority):
+      1. MI_HARD_DEFAULTS      — engine hard-coded fallbacks
+      2. default_values (raw)  — timeline creation placement / pose
+
+    The result is the value set that MI would use for any key absent from a
+    keyframe dict.  It is computed BEFORE fix_mi_yz_swap is applied to the
+    per-frame deltas, so we apply the swap here once rather than on every frame.
     """
-    for k, v in MI_HARD_DEFAULTS.items():
-        values.setdefault(k, v)
-    return values
+    baseline = dict(MI_HARD_DEFAULTS)
+    # Apply Y/Z swap to default_values before merging, so that the resulting
+    # baseline is already in the corrected coordinate space.
+    baseline.update(fix_mi_yz_swap(dict(default_values_raw)))
+    return baseline
 
 
 # ---- Data Classes ----------------------------------------------------------
@@ -148,33 +171,33 @@ class MINode:
         self.parent_tree_index = tl_dict.get("parent_tree_index", 0)
 
         # ── default_values: raw scene placement (creation position) ──────────
-        # IMPORTANT: This is NOT a "default value template".  It is the position
-        # where the user placed the object when they created it in MI.  It must
-        # NOT be used to seed keyframe data.  We store the raw (post-swap) dict
-        # so builder.py can write it as reference custom props.
+        # Stored post-yz-swap for use by apply_default_values_transform (static
+        # transform for objects without keyframes) and store_mi_placement
+        # (informational custom props).
         raw_dv = dict(tl_dict.get("default_values", {}))
         self.default_values = fix_mi_yz_swap(raw_dv)
 
+        # ── keyframe baseline (three-layer merge) ────────────────────────────
+        # MI only writes the *delta* from default_values into each keyframe.
+        # An empty keyframe dict ({}) means the frame is identical to
+        # default_values, NOT to MI_HARD_DEFAULTS (all-zeros).
+        #
+        # Effective baseline = MI_HARD_DEFAULTS ← default_values
+        # Per-keyframe data  = baseline ← authored per-frame delta
+        #
+        # _build_keyframe_baseline already applies fix_mi_yz_swap to the raw
+        # default_values, so kf_baseline is fully in corrected coordinate space.
+        kf_baseline = _build_keyframe_baseline(raw_dv)
+
         # ── keyframes ────────────────────────────────────────────────────────
-        # MI only writes non-default values into keyframes.
-        #
-        # `default_values` = object creation placement — IGNORED for keyframes.
-        #
-        # Keyframe merge priority (lowest → highest):
-        #   1. MI_HARD_DEFAULTS  — the engine's hard-coded fallback values
-        #   2. per-keyframe values from the JSON  — what the animator authored
-        #
-        # Processing:
-        #   a. fix_mi_yz_swap on raw per-frame dict (correct MI Y/Z swap bug)
-        #   b. Overlay per-frame values on top of MI_HARD_DEFAULTS baseline
         raw_kf = tl_dict.get("keyframes", {})
         self.keyframes = {}
         for frame_str, vals in raw_kf.items():
-            # Step a: correct the MI Y/Z coordinate swap bug
+            # Correct the MI Y/Z coordinate swap bug on the per-frame delta
             swapped = fix_mi_yz_swap(dict(vals))
-            # Step b: hard defaults as baseline, per-frame values override
-            merged = dict(MI_HARD_DEFAULTS)  # lowest priority: engine fallbacks
-            merged.update(swapped)           # highest priority: authored per-frame
+            # Merge: baseline (hard defaults + default_values) ← per-frame delta
+            merged = dict(kf_baseline)   # bottom: engine fallbacks + timeline placement
+            merged.update(swapped)        # top:    authored per-frame overrides
             self.keyframes[int(frame_str)] = merged
 
         # ── inherit flags ────────────────────────────────────────────────────

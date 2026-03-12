@@ -4,9 +4,13 @@ scene/builder.py — Recursively build the Blender scene from an MINode tree.
 Responsibilities:
   1. Create the appropriate Blender object for each MINode type.
   2. Set up parent-child relationships.
-  3. Zero the object transform (identity) — MI `default_values` is the creation
-     placement, NOT a Blender rest transform.  It is stored as reference custom
-     props via `store_mi_placement()` instead.
+  3. Set the object's initial transform:  
+     - Has keyframes → clear to identity, then apply_keyframes writes the full
+       animated trajectory.  Keyframes already encode the full absolute position
+       (parser merged: MI_HARD_DEFAULTS ← default_values ← per-frame delta).
+     - No keyframes → apply default_values as the static rest transform.
+       (default_values is layer-2 of the three-layer system; it is the exact
+       position the user placed the object in MI.)
   4. Apply keyframe animation (transform channels via animator.apply_keyframes).
   5. Apply keyframe-able custom props for ALL MI value tracks (via props module).
   6. Apply static appearance flags as non-animated custom props.
@@ -263,16 +267,19 @@ def _build_tree(node, parent_obj, collection, start_frame, fps_scale,
         obj.parent = parent_obj
 
     # ── Transform ────────────────────────────────────────────────────────────
-    # Strategy:
-    #   - Has keyframes → apply_keyframes writes the full animated trajectory
-    #                     (keyframes are absolute values in world/parent space).
-    #                     clear_transform first so we start from identity.
-    #   - No keyframes  → apply default_values as the static rest transform.
-    #                     (default_values is the position the user placed the
-    #                      object in MI; for un-animated objects this IS the
-    #                      intended position.)
-    # store_mi_placement stores default_values as reference custom props in
-    # either case.
+    # MI Three-Layer Design:
+    #   Layer 1: MI_HARD_DEFAULTS   (engine fallbacks; POS=0, SCA=1, ROT=0)
+    #   Layer 2: default_values     (creation placement; merged into every
+    #                                keyframe by the parser as the per-frame
+    #                                baseline — an empty keyframe {} expands
+    #                                to the default_values position)
+    #   Layer 3: per-frame delta    (authored per-keyframe overrides)
+    #
+    # Has keyframes → apply_keyframes writes the full absolute trajectory.
+    #   clear_transform first so we start from identity.
+    # No keyframes  → default_values IS the static rest transform (layer 2).
+    #
+    # store_mi_placement saves raw default_values as informational custom props.
     store_mi_placement(obj, node)
 
     kf_trans = []
@@ -280,7 +287,7 @@ def _build_tree(node, parent_obj, collection, start_frame, fps_scale,
         clear_transform(obj)
         kf_trans = apply_keyframes(obj, node, start_frame, fps_scale)
     else:
-        # No keyframes — use default_values as static transform
+        # No keyframes — default_values IS the complete static transform
         apply_default_values_transform(obj, node)
         apply_interpolation_to_obj(obj, kf_trans)
 
