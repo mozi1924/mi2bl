@@ -1,9 +1,14 @@
 import bpy
 import os
+import json
 from ..parsers import miobject_parser
+from ..parsers.miobject_parser import parse_miobject
+from ..utils.core import parse_mi_file_data
 from ..utils.rig2_utils import (
     _miobject_has_character, _find_all_char_anchors, _char_parent_chain_has_scale,
-    _append_rig2_armatures, _pick_parent_anchor, _bind_childof_follow, _parent_keep_world, _import_with_rig2_miframes
+    _append_rig2_armatures, _pick_parent_anchor, _bind_childof_follow,
+    _parent_keep_world, _import_with_rig2_miframes, _bind_ik_copy_location,
+    _bind_ik_constraint
 )
 from ..scene.builder import _build_tree, build_scene
 
@@ -147,6 +152,16 @@ class MI_OT_ImportMiobjectScene(bpy.types.Operator):
                         if not ok:
                             rig2_status += f", miframes[{i}] failed ({import_err})"
 
+                    # --- IK Copy Location binding (scene_importer only) ---
+                    # Now that imported_object_map is fully populated with MI id →
+                    # Blender object mappings, bind the Rig2 IK bones with Copy
+                    # Location constraints pointing to those scene objects.
+                    ik_bound = _apply_ik_constraints_from_miobject(
+                        rig2_armature, self.filepath, i, imported_object_map,
+                    )
+                    if ik_bound:
+                        rig2_status += f", IK bound: {','.join(ik_bound)}"
+
         elif self.auto_append_rig2 and not has_character_timeline:
             rig2_status = "Rig2: skipped (no character timeline)"
 
@@ -162,6 +177,58 @@ class MI_OT_ImportMiobjectScene(bpy.types.Operator):
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
+
+
+def _apply_ik_constraints_from_miobject(armature, filepath, char_index, object_map):
+    """
+    Parse the miobject file, extract IK target / pole MI object IDs for
+    the given character index, look them up in object_map, then bind the
+    Rig2 IK bones with Copy Location constraints.
+
+    Parameters
+    ----------
+    armature     : bpy.types.Object              — Rig2 armature
+    filepath     : str                           — path to .miobject file
+    char_index   : int                           — which character timeline (0-based)
+    object_map   : dict[str, bpy.types.Object]   — MI id → Blender object
+
+    Returns
+    -------
+    bound : list[str]  list of part_names that got IK constraints, or []
+    """
+    try:
+        with open(filepath, "r", encoding="utf-8") as fh:
+            raw_data = json.load(fh)
+    except Exception:
+        return []
+
+    # parse_mi_file_data extracts ik_data with target_id / pole_id
+    parsed = parse_mi_file_data(raw_data, char_index=char_index)
+    ik_data = parsed.get("ik_data", {})
+    if not ik_data:
+        return []
+
+    # Get ik_targets config from the active rig2 model config
+    ik_targets_cfg = {}
+    try:
+        from rig2_addons.src.modules.rig_controls.miframes.configs import MODELS
+        model_key = getattr(getattr(armature, "rig2_props", None), "mi_selected_model", "steve")
+        cfg = MODELS.get(model_key, {})
+        ik_targets_cfg = cfg.get("ik_targets", {})
+    except Exception:
+        pass
+
+    if not ik_targets_cfg:
+        # Fallback: hardcoded defaults matching ik_item.txt
+        ik_targets_cfg = {
+            "left_arm":  {"ik_target_bone": "MI_arm.ik.target.L", "ik_pole_bone": "MI_arm.ik.pt.L",  "logic_ik_prop": "mi_ik_arm.L"},
+            "right_arm": {"ik_target_bone": "MI_arm.ik.target.R", "ik_pole_bone": "MI_arm.ik.pt.R",  "logic_ik_prop": "mi_ik_arm.R"},
+            "left_leg":  {"ik_target_bone": "MI_leg.ik.target.L", "ik_pole_bone": "MI_leg.ik.pt.L",  "logic_ik_prop": "mi_ik_leg.L"},
+            "right_leg": {"ik_target_bone": "MI_leg.ik.target.R", "ik_pole_bone": "MI_leg.ik.pt.R",  "logic_ik_prop": "mi_ik_leg.R"},
+        }
+
+    _bind_ik_copy_location(armature, ik_data, ik_targets_cfg, object_map)
+    return _bind_ik_constraint(armature, ik_data, ik_targets_cfg, object_map)
 
 
 # ---- Menu entry ------------------------------------------------------------

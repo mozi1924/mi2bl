@@ -151,6 +151,54 @@ def apply_interpolation_to_obj(obj, kf_trans_list):
             fcurve.update()
 
 
+def apply_keyframes_ik_props(armature, node, start_frame, fps_scale):
+    """
+    Apply IK_BLEND and IK_ANGLE_OFFSET animation from MI character timelines
+    to the Rig2 armature's IK constraints.
+    """
+    if not armature or armature.type != 'ARMATURE' or node.type != "bodypart":
+        return
+
+    pose_bones = armature.pose.bones
+    part_name = node.model_part_name.strip().lower()
+    
+    # Map to solver bone
+    ik_solver_bones = {
+        "left_arm":  "MI_arm.lower.ik.L",
+        "right_arm": "MI_arm.lower.ik.R",
+        "left_leg":  "MI_leg.lower.ik.L",
+        "right_leg": "MI_leg.lower.ik.R",
+    }
+    
+    solver_name = ik_solver_bones.get(part_name)
+    if not solver_name:
+        return
+    
+    s_bone = pose_bones.get(solver_name)
+    if not s_bone:
+        return
+    
+    con = s_bone.constraints.get("MI2BL_IK_Solver")
+    if not con:
+        return
+
+    for frame_num in sorted(node.keyframes.keys()):
+        values = node.keyframes[frame_num]
+        time = start_frame + (frame_num * fps_scale)
+        
+        # IK_BLEND -> influence
+        if "IK_BLEND" in values:
+            con.influence = float(values["IK_BLEND"])
+            con.keyframe_insert("influence", frame=time)
+            
+        # IK_ANGLE_OFFSET -> pole_angle
+        # Base is -90 degrees
+        if "IK_ANGLE_OFFSET" in values:
+            offset = float(values["IK_ANGLE_OFFSET"])
+            con.pole_angle = math.radians(-90.0 + offset)
+            con.keyframe_insert("pole_angle", frame=time)
+
+
 def apply_default_values_transform(obj, node):
     """
     Apply `node.default_values` as a static (non-animated) Blender transform.

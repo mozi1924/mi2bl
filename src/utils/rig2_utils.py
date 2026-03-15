@@ -1,5 +1,6 @@
 import bpy
 import json
+import math
 from mathutils import Matrix
 
 def _operator_exists(path):
@@ -202,3 +203,159 @@ def _import_with_rig2_miframes(context, armature, filepath, start_frame):
                 context.view_layer.objects.active = prev_active
         except Exception:
             pass
+
+
+def _bind_ik_copy_location(armature, ik_data, ik_targets_cfg, object_map):
+    """
+    For each limb part that has IK references, add Copy Location constraints
+    on the Rig2 IK target / pole target bones pointing to the corresponding
+    imported scene objects, and activate the logic bone IK switch.
+
+    Parameters
+    ----------
+    armature       : bpy.types.Object   — Rig2 armature
+    ik_data        : dict               — from parse_mi_file_data()["ik_data"]
+                     format: { part_name: { "target_id": str, "pole_id": str } }
+    ik_targets_cfg : dict               — from config["ik_targets"]
+    object_map     : dict[str, bpy.Object] — MI id → Blender object
+
+    Returns
+    -------
+    bound : list[str]  — part names for which at least one constraint was added
+    """
+    if not armature or armature.type != 'ARMATURE':
+        return []
+
+    pose_bones = armature.pose.bones
+    bound = []
+
+    for part_name, ik_cfg in ik_targets_cfg.items():
+        part_ik = ik_data.get(part_name)
+        if not part_ik:
+            continue
+
+        target_bone_name = ik_cfg.get("ik_target_bone")
+        pole_bone_name   = ik_cfg.get("ik_pole_bone")
+        logic_prop       = ik_cfg.get("logic_ik_prop")
+        did_bind = False
+
+        # --- IK Target: Copy Location constraint ---
+        target_mi_id = part_ik.get("target_id")
+        if target_bone_name and target_mi_id:
+            target_obj = object_map.get(target_mi_id)
+            t_bone = pose_bones.get(target_bone_name)
+            if target_obj and t_bone:
+                con_name = f"MI2BL_IK_target"
+                # Remove existing constraint with same name to allow re-import
+                existing = t_bone.constraints.get(con_name)
+                if existing:
+                    t_bone.constraints.remove(existing)
+                con = t_bone.constraints.new(type='COPY_LOCATION')
+                con.name = con_name
+                
+                # For objects that have been converted to Pivot -> Data Proxy structure,
+                # we want the bone to track the Pivot (target_obj), but if the user
+                # specifically wants the constraint on a child, we could adjust.
+                # However, the task states "让骨骼复制变换这个空物体" (let the bone copy
+                # the transform of this empty object/pivot).
+                con.target = target_obj
+                con.use_offset = False
+                did_bind = True
+
+        # --- Pole Target: Copy Location constraint ---
+        pole_mi_id = part_ik.get("pole_id")
+        if pole_bone_name and pole_mi_id:
+            pole_obj = object_map.get(pole_mi_id)
+            p_bone = pose_bones.get(pole_bone_name)
+            if pole_obj and p_bone:
+                con_name = f"MI2BL_IK_pole"
+                existing = p_bone.constraints.get(con_name)
+                if existing:
+                    p_bone.constraints.remove(existing)
+                con = p_bone.constraints.new(type='COPY_LOCATION')
+                con.name = con_name
+                con.target = pole_obj
+                con.use_offset = False
+                did_bind = True
+
+        # --- Logic IK switch: set to 1.0 when any binding succeeded ---
+        if did_bind and logic_prop and "logic" in pose_bones:
+            logic_bone = pose_bones["logic"]
+            if logic_prop in logic_bone:
+                logic_bone[logic_prop] = 1.0
+            bound.append(part_name)
+
+    return bound
+
+
+def _bind_ik_constraint(armature, ik_data, ik_targets_cfg, object_map):
+    """
+    Apply standard IK constraints to the actual limb bones (lower parts),
+    pointing to the targets and poles that are already linked via Copy Location.
+    
+    In Rig2, the IK structure is:
+    - Target Bone: The bone that moves the limb (Copy Location to Scene Pivot).
+    - Pole Bone: The bone that controls orientation (Copy Location to Scene Pivot).
+    - Actual Bone (e.g. lower arm): Has the IK constraint targeting the Target/Pole bones.
+    """
+    if not armature or armature.type != 'ARMATURE':
+        return []
+
+    pose_bones = armature.pose.bones
+    bound = []
+
+    # Map MI part names to IK solver bones
+    # From ik_item.txt:
+    # MI_arm.lower.ik.L / R
+    # MI_leg.lower.ik.L / R
+    ik_solver_bones = {
+        "left_arm":  "MI_arm.lower.ik.L",
+        "right_arm": "MI_arm.lower.ik.R",
+        "left_leg":  "MI_leg.lower.ik.L",
+        "right_leg": "MI_leg.lower.ik.R",
+    }
+
+    for part_name, solver_bone_name in ik_solver_bones.items():
+        part_ik = ik_data.get(part_name)
+        ik_cfg = ik_targets_cfg.get(part_name)
+        if not part_ik or not ik_cfg:
+            continue
+
+        s_bone = pose_bones.get(solver_bone_name)
+        if not s_bone:
+            continue
+
+        con_name = "MI2BL_IK_Solver"
+        existing = s_bone.constraints.get(con_name)
+        if existing:
+            s_bone.constraints.remove(existing)
+
+        # Only add if we have at least a target
+        target_mi_id = part_ik.get("target_id")
+        if not target_mi_id:
+            continue
+
+        con = s_bone.constraints.new(type='IK')
+        con.name = con_name
+        con.target = armature
+        con.subtarget = ik_cfg.get("ik_target_bone")
+        con.chain_count = 2
+
+        # Pole target
+        pole_mi_id = part_ik.get("pole_id")
+        if pole_mi_id:
+            con.pole_target = armature
+            con.pole_subtarget = ik_cfg.get("ik_pole_bone")
+            
+            # Base Pole Angle: -90 degrees as per report
+            # We'll keyframe mi_angle_offset later to handle delta
+            con.pole_angle = math.radians(-90.0)
+
+        # Influence/Blend
+        # Initial value, will be keyframed by mi_blend
+        con.influence = 1.0
+        
+        bound.append(part_name)
+
+    return bound
+

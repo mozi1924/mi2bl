@@ -143,6 +143,8 @@ def parse_mi_file_data(data, char_index=0):
     timelines = data.get("timelines", [])
     # Build template lookup for model name resolution
     template_map = {t["id"]: t for t in data.get("templates", []) if "id" in t}
+    # Build id -> timeline dict for IK target lookups
+    tl_by_id = {t.get("id"): t for t in timelines if t.get("id")}
 
     primary_id = None
     is_model = False
@@ -158,7 +160,7 @@ def parse_mi_file_data(data, char_index=0):
         primary_id = t.get("id")
         is_model = True
         primary_template = template_map.get(t.get("temp", ""), {})
-            
+
     if not is_model:
         for t in timelines:
             parent = t.get("parent")
@@ -170,7 +172,7 @@ def parse_mi_file_data(data, char_index=0):
     for tl in timelines:
         tl_id = tl.get("id")
         part_of = tl.get("part_of")
-        
+
         if is_model:
             if tl_id == primary_id:
                 part_name = "root"
@@ -183,11 +185,11 @@ def parse_mi_file_data(data, char_index=0):
                 part_name = "root"
             else:
                 continue
-            
+
         kf_dict = tl.get("keyframes", {})
         if not kf_dict:
             kf_dict["0"] = {}
-            
+
         for frame_str, kf_vals in kf_dict.items():
             frame_num = int(frame_str)
             combined = dict(kf_vals)
@@ -198,7 +200,7 @@ def parse_mi_file_data(data, char_index=0):
                 "part_name": part_name,
                 "values": fixed_combined
             })
-            
+
     keyframes_list.sort(key=lambda x: x["position"])
     if len(keyframes_list) > 0:
         firstpos = keyframes_list[0]["position"]
@@ -207,8 +209,9 @@ def parse_mi_file_data(data, char_index=0):
             kf["position"] -= firstpos
         final_length = lastpos - firstpos
     else:
+        firstpos = 0
         final_length = 0
-    
+
     result = {
         "format": data.get("format", 34),
         "is_model": is_model,
@@ -220,7 +223,84 @@ def parse_mi_file_data(data, char_index=0):
     model_info = primary_template.get("model") or data.get("model")
     if model_info:
         result["model"] = model_info
+
+    # ── IK Data extraction ────────────────────────────────────────────────────
+    # For each bodypart that has IK_TARGET / IK_TARGET_ANGLE references,
+    # record the MI object IDs of the target and pole objects so that
+    # scene_importer can look them up in the imported object_map and bind
+    # the Rig2 IK bones with Copy Location constraints.
+    #
+    # Structure of ik_data:
+    #   {
+    #     "<model_part_name>": {
+    #         "target_id":      str,   — MI id of the IK target object
+    #         "pole_id":        str,   — MI id of the pole target object
+    #         "ik_blend_frames": [(frame_num, blend), ...],  # optional
+    #     },
+    #     ...
+    #   }
+
+    if is_model:
+        ik_data = _extract_ik_data(timelines, primary_id, firstpos)
+        if ik_data:
+            result["ik_data"] = ik_data
+
     return result
+
+
+def _extract_ik_data(timelines, primary_id, firstpos):
+    """
+    Scan all bodypart timelines that are part_of the primary char,
+    collect IK_TARGET / IK_TARGET_ANGLE MI object IDs per model_part_name.
+
+    Returns a dict keyed by model_part_name (lowercase), e.g.:
+      {
+        "left_leg":  {"target_id": "<MI_ID>", "pole_id": "<MI_ID>"},
+        "right_arm": {"target_id": "<MI_ID>"},
+        ...
+      }
+    Entries with neither target_id nor pole_id are omitted.
+    """
+    ik_data = {}
+
+    for tl in timelines:
+        if tl.get("type") != "bodypart":
+            continue
+        if tl.get("part_of") != primary_id:
+            continue
+        part_name = tl.get("model_part_name", "").strip().lower()
+        if not part_name:
+            continue
+
+        kf_dict = tl.get("keyframes", {})
+        target_id = None
+        pole_id = None
+        blend_frames = []
+        for frame_str, vals in sorted(kf_dict.items(), key=lambda x: int(x[0])):
+            t = vals.get("IK_TARGET")
+            if t and t not in ("", "null", None) and target_id is None:
+                target_id = t
+            p = vals.get("IK_TARGET_ANGLE")
+            if p and p not in ("", "null", None) and pole_id is None:
+                pole_id = p
+            b = vals.get("IK_BLEND")
+            if b is not None:
+                frame_num = int(frame_str) - firstpos
+                blend_frames.append((frame_num, float(b)))
+
+        if not target_id and not pole_id:
+            continue
+
+        entry = {}
+        if target_id:
+            entry["target_id"] = target_id
+        if pole_id:
+            entry["pole_id"] = pole_id
+        if blend_frames:
+            entry["ik_blend_frames"] = blend_frames
+        ik_data[part_name] = entry
+
+    return ik_data
 
 # --- Base Importer Mixin ---
 

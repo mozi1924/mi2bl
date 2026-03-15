@@ -30,14 +30,17 @@ import bpy
 import math
 from ..scene import mesh_gen
 from ..utils.transforms import clear_transform
-from ..scene.animator import apply_keyframes, apply_interpolation_to_obj, apply_default_values_transform
+from ..scene.animator import (
+    apply_keyframes, apply_interpolation_to_obj,
+    apply_default_values_transform, apply_keyframes_ik_props
+)
 from ..scene.props import apply_node_custom_props, apply_node_static_props, store_mi_placement
 from ..scene.lights import apply_light_properties
 from ..scene.cameras import apply_camera_properties
 from ..scene.paths import create_path_curve, apply_follow_path_constraint
 
 
-def _create_blender_object(node, collection):
+def _create_blender_object(node, collection, is_ik_target=False):
     """
     Create the appropriate Blender object for an MINode.
     Returns the bpy object (always the "pivot" object for compound types).
@@ -82,7 +85,27 @@ def _create_blender_object(node, collection):
 
     # ── Object creation by type ───────────────────────────────────────────────
 
-    if node.type == "folder":
+    if is_ik_target:
+        # Pivot empty — holds MI transform animation
+        obj = bpy.data.objects.new(display_name, None)
+        obj.empty_display_type = 'PLAIN_AXES'
+        collection.objects.link(obj)
+
+        # Data proxy — the actual target that Rig2 bones will copy
+        # We use a sphere empty for visibility
+        target_obj = bpy.data.objects.new(display_name + "_IKTarget", None)
+        target_obj.empty_display_type = 'SPHERE'
+        target_obj.empty_display_size = 0.2
+        collection.objects.link(target_obj)
+        target_obj.parent = obj
+
+        # Lock proxy transforms (it's a fixed proxy)
+        for i in range(3):
+            target_obj.lock_location[i] = True
+            target_obj.lock_rotation[i] = True
+            target_obj.lock_scale[i]    = True
+
+    elif node.type == "folder":
         obj = bpy.data.objects.new(display_name, None)
         obj.empty_display_type = 'PLAIN_AXES'
         obj.empty_display_size = 0.5
@@ -233,8 +256,10 @@ def _extract_follow_path_data(node):
 
 
 def _build_tree(node, parent_obj, collection, start_frame, fps_scale,
-                object_map=None, disable_scale_node_ids=None):
+                object_map=None, disable_scale_node_ids=None, ik_target_ids=None):
     """Recursively create Blender objects from an MINode tree."""
+
+    ik_target_ids = ik_target_ids or set()
 
     # ── Path nodes: build the NURBS curve from pathpoint children ────────────
     if node.type == "path":
@@ -248,7 +273,7 @@ def _build_tree(node, parent_obj, collection, start_frame, fps_scale,
     if node.type == "pathpoint":
         # Create a minimal placeholder so the tree is consistent, but don't
         # recurse further (pathpoints have no meaningful children).
-        obj = _create_blender_object(node, collection)
+        obj = _create_blender_object(node, collection, is_ik_target=(node.id in ik_target_ids))
         if object_map is not None:
             object_map[node.id] = obj
         if parent_obj is not None:
@@ -258,7 +283,7 @@ def _build_tree(node, parent_obj, collection, start_frame, fps_scale,
         return obj
 
     # ── Standard objects ──────────────────────────────────────────────────────
-    obj = _create_blender_object(node, collection)
+    obj = _create_blender_object(node, collection, is_ik_target=(node.id in ik_target_ids))
     if object_map is not None:
         object_map[node.id] = obj
 
@@ -302,7 +327,7 @@ def _build_tree(node, parent_obj, collection, start_frame, fps_scale,
     if node.type in _pivot_custom_prop_types:
         apply_node_custom_props(obj, node, start_frame, fps_scale)
         apply_node_static_props(obj, node)
-    elif node.type in ("camera", "pointlight", "spotlight"):
+    elif node.type in ("camera", "pointlight", "spotlight") or node.id in ik_target_ids:
         # Pivot gets common props (ALPHA, VISIBLE, RGB_MUL, etc.)
         apply_node_custom_props(obj, node, start_frame, fps_scale)
         apply_node_static_props(obj, node)
@@ -328,12 +353,17 @@ def _build_tree(node, parent_obj, collection, start_frame, fps_scale,
             # apply_camera_properties already calls apply_node_custom_props +
             # apply_node_static_props on child_obj; no duplicate call needed.
 
+    # ── Character IK Props ──────────────────────────────────────────────────
+    # If this is a char/bodypart node, and we have an armature, apply IK animation
+    if node.type == "bodypart" and parent_obj and parent_obj.type == 'ARMATURE':
+        apply_keyframes_ik_props(parent_obj, node, start_frame, fps_scale)
+
     # ── Recurse children (char children handled by Rig2) ─────────────────────
     if node.type != "char":
         for child_node in node.children:
             _build_tree(
                 child_node, obj, collection, start_frame, fps_scale,
-                object_map, disable_scale_node_ids,
+                object_map, disable_scale_node_ids, ik_target_ids,
             )
 
     return obj
@@ -399,7 +429,7 @@ def _build_path_node(node, parent_obj, collection, start_frame, fps_scale,
     for child_node in other_children:
         _build_tree(
             child_node, curve_obj, collection, start_frame, fps_scale,
-            object_map, disable_scale_node_ids,
+            object_map, disable_scale_node_ids, ik_target_ids,
         )
 
     return curve_obj
@@ -472,11 +502,23 @@ def build_scene(roots, all_nodes, collection, start_frame=1, fps_scale=1.0,
     """
     object_map = {}
 
+    # ── Identify IK targets ──────────────────────────────────────────────────
+    ik_target_ids = set()
+    for node in all_nodes.values():
+        if node.type == "bodypart":
+            for frame_vals in node.keyframes.values():
+                t = frame_vals.get("IK_TARGET")
+                if t and t not in ("", "null", None):
+                    ik_target_ids.add(t)
+                p = frame_vals.get("IK_TARGET_ANGLE")
+                if p and p not in ("", "null", None):
+                    ik_target_ids.add(p)
+
     # ── First pass: build the object tree ────────────────────────────────────
     for root_node in roots:
         _build_tree(
             root_node, None, collection, start_frame, fps_scale,
-            object_map, disable_scale_node_ids,
+            object_map, disable_scale_node_ids, ik_target_ids,
         )
 
     # ── Second pass: Follow Path constraints ──────────────────────────────────
